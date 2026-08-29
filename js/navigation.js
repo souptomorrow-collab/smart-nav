@@ -29,12 +29,13 @@ export function maneuverIconSVG(type, modifier, color = '#fff') {
 
 /**
  * 單一車道箭頭圖示。
- * emphasis：'on' 亮白（可走方向）/ 'mid' 半亮（可走車道的其他方向）/ 'off' 變暗（不可走）
+ * emphasis：'on' 亮（可走方向）/ 'mid' 半亮（可走車道的其他方向）/ 'off' 變暗（不可走）
+ * palette 可自訂三種狀態的顏色（深色背景預設白色系）
  */
-export function laneIconSVG(direction, emphasis) {
-  const color = emphasis === 'on' ? '#ffffff'
-    : emphasis === 'mid' ? 'rgba(255,255,255,.5)'
-    : 'rgba(255,255,255,.26)';
+const LANE_PALETTE = { on: '#ffffff', mid: 'rgba(255,255,255,.5)', off: 'rgba(255,255,255,.26)' };
+
+export function laneIconSVG(direction, emphasis, palette = LANE_PALETTE) {
+  const color = palette[emphasis] || palette.off;
   const angle = MOD_ANGLES[direction] ?? 0;
   if (direction === 'uturn') {
     return `<svg viewBox="0 0 48 48"><path fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round" d="M18 42V21a8 8 0 0 1 16 0v6"/><path fill="${color}" d="M34 38l-7-10h14z"/></svg>`;
@@ -99,6 +100,13 @@ function bearingToChar(brg) {
   return '西';
 }
 
+// ---- 下一個轉彎點標記 ----
+function createTurnMarkerElement() {
+  const el = document.createElement('div');
+  el.className = 'turn-marker';
+  return el;
+}
+
 // ---- 自車圖標 ----
 function createPuckElement() {
   const el = document.createElement('div');
@@ -146,6 +154,12 @@ export class Navigator {
         pitchAlignment: 'map',
       }).setLngLat(this.navCoords[0]).addTo(this.map);
     }
+    if (!this.turnMarker) {
+      this.turnMarker = new mapboxgl.Marker({ element: createTurnMarkerElement() })
+        .setLngLat(this.navCoords[0]).addTo(this.map);
+    }
+    this.lastTurnIdx = -1;
+    this.updateTurnMarker();
 
     speak('開始導航。' + (this.flatSteps[0]?.step.maneuver.instruction || ''));
 
@@ -186,6 +200,7 @@ export class Navigator {
     this.spoken = new Set();
     this.laneSpoken = new Set();
     this.currentStepIndex = 0;
+    this.lastTurnIdx = -1;
     this.offRouteCounter = 0;
     this.simAlong = 0;
     this.computeRouteCameras();
@@ -374,6 +389,7 @@ export class Navigator {
     let csi = this.currentStepIndex;
     while (csi < this.flatSteps.length - 1 && along >= this.flatSteps[csi].endDist) csi++;
     this.currentStepIndex = csi;
+    this.updateTurnMarker();
     const cur = this.flatSteps[csi];
     const next = this.flatSteps[csi + 1] || null;
     const distToManeuver = Math.max(0, cur.endDist - along);
@@ -534,6 +550,24 @@ export class Navigator {
     });
   }
 
+  /** 把大箭頭標記移到下一個轉彎點（跨步時才更新） */
+  updateTurnMarker() {
+    if (!this.turnMarker) return;
+    const csi = this.currentStepIndex;
+    if (this.lastTurnIdx === csi) return;
+    this.lastTurnIdx = csi;
+    const el = this.turnMarker.getElement();
+    const nx = this.flatSteps[csi + 1];
+    if (nx) {
+      const m = nx.step.maneuver;
+      el.innerHTML = maneuverIconSVG(m.type, m.modifier, '#0f5132');
+      el.style.display = '';
+      this.turnMarker.setLngLat(m.location || this.navCoords[nx.startIdx]);
+    } else {
+      el.style.display = 'none';
+    }
+  }
+
   async reroute(currentPos, heading) {
     if (this.rerouting) return;
     this.rerouting = true;
@@ -598,6 +632,10 @@ export class Navigator {
     if (this.puck) {
       this.puck.remove();
       this.puck = null;
+    }
+    if (this.turnMarker) {
+      this.turnMarker.remove();
+      this.turnMarker = null;
     }
     if ('speechSynthesis' in window) speechSynthesis.cancel();
   }

@@ -147,6 +147,17 @@ export function ensureRouteLayers(map) {
       ],
     },
   });
+  // 轉彎點白色圓點
+  map.addSource('route-turns', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'route-turns-dots', type: 'circle', source: 'route-turns', ...slot,
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4, 17, 5.5],
+      'circle-color': '#ffffff',
+      'circle-stroke-color': '#0b4aa2',
+      'circle-stroke-width': 1.5,
+    },
+  });
 }
 
 /**
@@ -167,12 +178,28 @@ export function drawRoutes(map, routes, selectedIndex = 0) {
     type: 'FeatureCollection',
     features: routeToCongestionFeatures(routes[selectedIndex]),
   });
+  // 選定路線的轉彎點（起點與終點除外）
+  const turns = [];
+  for (const leg of routes[selectedIndex].legs || []) {
+    for (const step of leg.steps || []) {
+      const t = step.maneuver && step.maneuver.type;
+      if (t && t !== 'depart' && t !== 'arrive' && step.maneuver.location) {
+        turns.push({
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'Point', coordinates: step.maneuver.location },
+        });
+      }
+    }
+  }
+  map.getSource('route-turns').setData({ type: 'FeatureCollection', features: turns });
 }
 
 export function clearRoutes(map) {
   if (!map.getSource('route-alts')) return;
   map.getSource('route-alts').setData(emptyFC());
   map.getSource('route-main').setData(emptyFC());
+  if (map.getSource('route-turns')) map.getSource('route-turns').setData(emptyFC());
 }
 
 function emptyFC() {

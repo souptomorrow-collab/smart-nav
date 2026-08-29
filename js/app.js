@@ -346,17 +346,41 @@ function renderRouteCards() {
   });
 }
 
+const STEP_LANE_PALETTE = { on: '#1a73e8', mid: '#8ab4f8', off: '#c9ced6' };
+
 function renderStepsList(route) {
   const steps = [];
   for (const leg of route.legs) for (const s of leg.steps) steps.push(s);
-  const items = steps.map((s) => `
+  const items = steps.map((s, i) => {
+    // 這一步的轉彎車道資訊掛在「上一步」的 banner sub 區塊
+    let laneHtml = '';
+    if (i > 0) {
+      const banner = (steps[i - 1].bannerInstructions || []).find(
+        (b) => b.sub && b.sub.components && b.sub.components.some((c) => c.type === 'lane')
+      );
+      if (banner) {
+        const cells = banner.sub.components
+          .filter((c) => c.type === 'lane')
+          .map((c) => {
+            const dirs = c.directions && c.directions.length ? c.directions : ['straight'];
+            return dirs
+              .map((d) => laneIconSVG(d, c.active ? 'on' : 'off', STEP_LANE_PALETTE))
+              .join('');
+          })
+          .join('<span class="step-lane-sep"></span>');
+        laneHtml = `<div class="step-lanes">${cells}</div>`;
+      }
+    }
+    return `
     <div class="drawer-item">
       <span style="width:22px;height:22px;flex-shrink:0">${maneuverIconSVG(s.maneuver.type, s.maneuver.modifier, '#5f6368')}</span>
       <div class="drawer-item-main">
         <div class="di-name">${escapeHtml(s.maneuver.instruction)}</div>
         ${s.distance > 0 ? `<div class="di-context">${fmtDistance(s.distance)}</div>` : ''}
+        ${laneHtml}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   return `<details><summary class="text-btn" style="cursor:pointer;padding:6px 0">📋 檢視路線步驟（${steps.length} 步）</summary>${items}</details>`;
 }
 
