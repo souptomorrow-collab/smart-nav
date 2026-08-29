@@ -165,8 +165,21 @@ function openRoutePanel({ origin, dest } = {}) {
   tryRoute();
 }
 
-function closeRoutePanel() {
+function closeRoutePanel({ keepRoute = false } = {}) {
   $('route-panel').hidden = true;
+  if (!keepRoute) clearRouteState();
+}
+
+/** 清除路線的所有痕跡：路線圖層、轉彎點、起訖標記、照相圖示與結果卡片 */
+function clearRouteState() {
+  routeState.routes = null;
+  routeState.waypoints = null;
+  clearRoutes(map);
+  clearRouteCameras();
+  stopMarkers.forEach((m) => m.remove());
+  stopMarkers = [];
+  $('route-alternatives').innerHTML = '';
+  $('route-actions').hidden = true;
 }
 
 function stopLabel(i, n) {
@@ -422,7 +435,7 @@ function startNavigation(simulate) {
   const route = routeState.routes[routeState.selectedIndex];
 
   hidePanels();
-  closeRoutePanel();
+  closeRoutePanel({ keepRoute: true });
   $('topbar').hidden = true;
   $('map-tools').hidden = true;
   $('nav-hud').hidden = false;
@@ -433,7 +446,7 @@ function startNavigation(simulate) {
     onUpdate: updateNavHUD,
     onArrive: () => {
       toast('🏁 您已抵達目的地！');
-      setTimeout(exitNavigation, 2500);
+      setTimeout(() => exitNavigation(true), 2500);
     },
     onReroute: (newRoute) => {
       routeState.routes = [newRoute];
@@ -620,7 +633,7 @@ function updateNavHUD(s) {
   }
 }
 
-function exitNavigation() {
+function exitNavigation(clearAll = false) {
   if (navigator_) { navigator_.stop(); navigator_ = null; }
   navigating = false;
   clearRouteCameras();
@@ -634,7 +647,9 @@ function exitNavigation() {
     pitch: mapState.is3D ? 45 : 0,
     duration: 800,
   });
-  if (routeState.routes) {
+  if (clearAll) {
+    clearRouteState();
+  } else if (routeState.routes) {
     drawRoutes(map, routeState.routes, routeState.selectedIndex);
     $('route-panel').hidden = false;
     renderStops();
@@ -642,7 +657,7 @@ function exitNavigation() {
 }
 
 function setupNavHUD() {
-  $('nav-exit').addEventListener('click', exitNavigation);
+  $('nav-exit').addEventListener('click', () => exitNavigation(false));
   $('nav-overview').addEventListener('click', () => { if (navigator_) navigator_.overview(); });
   $('recenter-btn').addEventListener('click', () => { if (navigator_) navigator_.setFollowing(true); });
   $('nav-mute').addEventListener('click', () => {

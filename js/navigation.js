@@ -347,8 +347,12 @@ export class Navigator {
         }
       }
       if (v === null) {
-        const fs = this.flatSteps[this.currentStepIndex];
-        v = fs && fs.step.duration > 0 ? fs.step.distance / fs.step.duration : 12;
+        if (this.profile.startsWith('driving')) {
+          v = 50 / 3.6; // 開車模式：無速限資料的路段以 50 km/h 模擬
+        } else {
+          const fs = this.flatSteps[this.currentStepIndex];
+          v = fs && fs.step.duration > 0 ? fs.step.distance / fs.step.duration : 12;
+        }
       }
       v = Math.max(3, Math.min(v, 34)); // 上限約 120 km/h
       this.simAlong = Math.min(this.simAlong + v * (TICK / 1000), this.total);
