@@ -10,22 +10,121 @@ export function setProximity(lngLat) {
 
 /**
  * 正向地理編碼（搜尋）。回傳 [{ name, address, lngLat }]
- * 主要走 Search Box API（地標 / 店家 / 學校等 POI 資料較完整），
- * 查不到或失敗時退回舊版 Geocoding API（純地址較強）。
+ *
+ * 策略：
+ * 1. 查詢展開：台/臺 互換、學校名自動補「國立」前綴（口語常省略）
+ * 2. 以 Search Box API 平行查詢所有變體並合併
+ * 3. 沒有名稱高度吻合的結果時，加問 OSM Nominatim（台灣在地資料豐富）
+ * 4. 全部落空時退回舊版 Geocoding API（純地址較強）
+ * 最後依「名稱與輸入的吻合度」排序，避免字面拆開的模糊比對排在前面。
  */
 export async function geocode(query, { limit = 6, signal } = {}) {
   const coords = parseCoords(query);
   if (coords) {
     return [{ name: fmtCoords(coords), address: '座標位置', lngLat: coords }];
   }
-  try {
-    const results = await searchBoxForward(query, { limit, signal });
-    if (results.length) return results;
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    // Search Box 失敗時繼續嘗試舊版 API
+
+  const variants = buildVariants(query);
+  const settled = await Promise.all(
+    variants.map((v) =>
+      searchBoxForward(v, { limit, signal }).catch((e) => {
+        if (e.name === 'AbortError') throw e;
+        return [];
+      })
+    )
+  );
+  let merged = rankAndDedupe(settled.flat(), query);
+
+  if (!hasStrongMatch(merged, query)) {
+    const nom = await nominatimSearch(variants, { signal }).catch(() => []);
+    merged = rankAndDedupe(merged.concat(nom), query);
   }
-  return legacyGeocode(query, { limit, signal });
+  if (!merged.length) {
+    merged = await legacyGeocode(query, { limit, signal }).catch(() => []);
+  }
+  return merged.slice(0, 8);
+}
+
+/** 正規化：小寫、台→臺、去空白，用於比對 */
+function norm(s) {
+  return String(s || '').toLowerCase().replace(/台/g, '臺').replace(/[\s　]/g, '');
+}
+
+/** 產生查詢變體：原文、台/臺互換、補「國立」的學校名 */
+function buildVariants(query) {
+  const v = [query];
+  let swapped = null;
+  if (query.includes('台')) swapped = query.replace(/台/g, '臺');
+  else if (query.includes('臺')) swapped = query.replace(/臺/g, '台');
+  if (swapped && swapped !== query) v.push(swapped);
+  const qn = norm(query);
+  if (/(大學|學院|高中|中學|國中|國小|小學|科大)$/.test(qn) && !/^(國立|市立|縣立|私立)/.test(qn)) {
+    v.push('國立' + query);
+  }
+  return v.slice(0, 3);
+}
+
+/** 名稱吻合度：完全相同 > 名稱包含輸入 > 輸入包含名稱 > 地址包含輸入 */
+const MINOR_KINDS = new Set(['bus_stop', 'bicycle_rental', 'platform', 'stop_position', 'parking_entrance']);
+
+function matchScore(item, qn) {
+  if (!qn) return 0;
+  const n = norm(item.name);
+  const a = norm(item.address);
+  let s = 0;
+  if (n === qn) s = 120;
+  else if (n.includes(qn)) s = 100;
+  else if (qn.includes(n) && n.length >= 3) s = 90;
+  else if (a.includes(qn)) s = 40;
+  // 公車站、YouBike 站這類附屬設施降權，讓主體地標排前面
+  if (s > 0 && MINOR_KINDS.has(item.kind)) s -= 25;
+  return s;
+}
+
+function rankAndDedupe(items, query) {
+  const qn = norm(query);
+  const seen = new Set();
+  const unique = [];
+  for (const it of items) {
+    if (!it.lngLat) continue;
+    const key = `${norm(it.name)}|${it.lngLat[0].toFixed(3)},${it.lngLat[1].toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(it);
+  }
+  return unique
+    .map((it, i) => ({ it, i, s: matchScore(it, qn) }))
+    .sort((x, y) => y.s - x.s || x.i - y.i)
+    .map((x) => x.it);
+}
+
+function hasStrongMatch(items, query) {
+  const qn = norm(query);
+  return items.some((it) => matchScore(it, qn) >= 90);
+}
+
+/** OSM Nominatim：免金鑰的開放資料搜尋，台灣機構名稱涵蓋佳 */
+async function nominatimSearch(variants, { signal }) {
+  const qs = [variants[0]];
+  const withPrefix = variants.find((v) => v.startsWith('國立'));
+  if (withPrefix) qs.push(withPrefix);
+  const settled = await Promise.all(
+    qs.map(async (q) => {
+      const params = new URLSearchParams({
+        q, format: 'jsonv2', limit: '5', 'accept-language': 'zh-TW',
+      });
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { signal });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.map((r) => ({
+        name: r.name || (r.display_name || '').split(',')[0],
+        address: r.display_name || '',
+        lngLat: [parseFloat(r.lon), parseFloat(r.lat)],
+        kind: r.type || '',
+      }));
+    })
+  );
+  return settled.flat();
 }
 
 /** Mapbox Search Box API：POI 涵蓋佳，支援中文地標名稱 */
