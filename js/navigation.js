@@ -1,7 +1,7 @@
 // ============ 逐步導航引擎 ============
 // GPS 追蹤、路線吸附、轉彎提示、語音播報、偏航重規劃、模擬導航
 import {
-  distance, bearing, snapToLine, cumulativeDistances, interpolate, fmtDistance,
+  distance, bearing, destination, snapToLine, cumulativeDistances, interpolate, fmtDistance,
 } from './utils.js';
 import { speak } from './voice.js';
 import { fetchRoutes } from './routing.js';
@@ -136,6 +136,35 @@ function ensureArrowheadImage(map) {
 }
 
 const EMPTY_FC = { type: 'FeatureCollection', features: [] };
+
+// ---- 平面路徑簡化（RDP），用於路口放大圖去除 GPS 抖動 ----
+function pointSegDist2D(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  let t = 0;
+  if (len2 > 0) t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2));
+  return Math.hypot(p[0] - (a[0] + dx * t), p[1] - (a[1] + dy * t));
+}
+
+function simplifyPath(pts, tol) {
+  if (pts.length <= 2) return pts;
+  const keep = new Array(pts.length).fill(false);
+  keep[0] = keep[pts.length - 1] = true;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    let maxD = 0, idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const d = pointSegDist2D(pts[i], pts[a], pts[b]);
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD > tol && idx > 0) {
+      keep[idx] = true;
+      stack.push([a, idx], [idx, b]);
+    }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
 
 // ---- 自車圖標 ----
 function createPuckElement() {
@@ -681,49 +710,56 @@ export class Navigator {
   }
 
   /**
-   * 建立路口放大圖資料：取轉彎點前 110 / 後 85 公尺的路線幾何，
-   * 投影到平面並旋轉成「行進方向朝上」，縮放進 300x300 畫布。
+   * 建立路口放大圖資料（Garmin 式）：
+   * - 固定比例（1.5 px/公尺）、轉彎點置中偏下、進入方向朝上
+   * - 路線幾何經 RDP 簡化去除 GPS 抖動
+   * - 額外畫出「直行延伸段」與「轉入道路的另一端」，構成完整路口
+   * 回傳 { key, route: [[x,y]...], roads: [[[x,y],[x,y]]...] }
    */
   buildJunctionView(csi) {
     const nx = this.flatSteps[csi + 1];
     if (!nx) return null;
     const mIdx = nx.startIdx;
     const mDist = this.cumDist[mIdx];
-    const startD = Math.max(0, mDist - 110);
-    const endD = Math.min(this.total, mDist + 85);
-    const pts = [this.pointAt(startD)];
-    const iStart = this.lowerBound(this.cumDist, startD) + 1;
-    const iEnd = this.lowerBound(this.cumDist, endD);
-    for (let i = iStart; i <= iEnd; i++) pts.push(this.navCoords[i]);
-    pts.push(this.pointAt(endD));
+    const SCALE = 1.5;           // 每公尺像素
+    const CX = 150, CY = 175;    // 轉彎點在畫布上的位置
+    const BEFORE = 85, AFTER = 60, STUB = 45;
 
-    // 以轉彎點為原點換算為公尺
     const m = this.navCoords[mIdx];
     const cosLat = Math.cos((m[1] * Math.PI) / 180);
-    const th = (this.bearingAt(Math.max(0, mDist - 25)) * Math.PI) / 180;
-    const proj = pts.map((p) => {
+    const th = (this.bearingAt(Math.max(0, mDist - 20)) * Math.PI) / 180;
+    const toCanvas = (p) => {
       const x = (p[0] - m[0]) * 111320 * cosLat;
       const y = (p[1] - m[1]) * 110540;
-      // 旋轉讓進入方向朝上（SVG 的 y 軸向下）
-      return [x * Math.cos(th) - y * Math.sin(th), -(x * Math.sin(th) + y * Math.cos(th))];
-    });
-    // 縮放置中到 300x300（留 45px 邊距）
-    const xs = proj.map((p) => p[0]);
-    const ys = proj.map((p) => p[1]);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const s = Math.min((300 - 90) / Math.max(maxX - minX, 40), (300 - 90) / Math.max(maxY - minY, 40));
-    const ox = (300 - s * (minX + maxX)) / 2;
-    const oy = (300 - s * (minY + maxY)) / 2;
-    const scaled = proj.map(([x, y]) => [x * s + ox, y * s + oy]);
-    // 去除過近的點讓路徑平滑
-    const clean = scaled.filter((p, i) => {
-      if (i === 0 || i === scaled.length - 1) return true;
-      const q = scaled[i - 1];
-      return Math.hypot(p[0] - q[0], p[1] - q[1]) > 3;
-    });
-    if (clean.length < 2) return null;
-    return { key: csi, pts: clean };
+      return [
+        (x * Math.cos(th) - y * Math.sin(th)) * SCALE + CX,
+        -(x * Math.sin(th) + y * Math.cos(th)) * SCALE + CY,
+      ];
+    };
+
+    // 路線（轉彎前後）
+    const startD = Math.max(0, mDist - BEFORE);
+    const endD = Math.min(this.total, mDist + AFTER);
+    const pts = [this.pointAt(startD)];
+    for (let i = this.lowerBound(this.cumDist, startD) + 1; i <= this.lowerBound(this.cumDist, endD); i++) {
+      pts.push(this.navCoords[i]);
+    }
+    pts.push(this.pointAt(endD));
+    const route = simplifyPath(pts.map(toCanvas), 4);
+    if (route.length < 2) return null;
+
+    // 兩條灰色延伸段：沒轉彎會走的直行方向 + 轉入道路的另一端
+    const mPt = toCanvas(m);
+    const contBrg = this.bearingAt(Math.max(0, mDist - 5));
+    const exitBrg = this.bearingAt(Math.min(this.total, mDist + 12));
+    const roads = [[mPt, toCanvas(destination(m, STUB, contBrg))]];
+    // 轉角明顯時才畫轉入道路的反向端（避免直行時重疊）
+    let diff = Math.abs(exitBrg - contBrg);
+    if (diff > 180) diff = 360 - diff;
+    if (diff > 25) {
+      roads.push([mPt, toCanvas(destination(m, STUB, (exitBrg + 180) % 360))]);
+    }
+    return { key: csi, route, roads };
   }
 
   clearTurnArrow() {

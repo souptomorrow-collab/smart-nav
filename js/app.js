@@ -436,6 +436,7 @@ function startNavigation(simulate) {
 
   hidePanels();
   closeRoutePanel({ keepRoute: true });
+  document.body.classList.add('navigating');
   $('topbar').hidden = true;
   $('map-tools').hidden = true;
   $('nav-hud').hidden = false;
@@ -533,19 +534,43 @@ function onNavDrag() {
 let lastLanesKey = '';
 let lastJunctionKey = null;
 
-/** 路口放大圖：以 Garmin 式洋紅色粗箭頭沿實際路線幾何繪製 */
+/** 把折線轉成帶圓角轉折的 SVG path */
+function roundedPath(pts, r = 16) {
+  if (pts.length < 3) {
+    return 'M' + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L');
+  }
+  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1];
+    const d1 = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+    const d2 = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    const r1 = Math.min(r, d1 / 2), r2 = Math.min(r, d2 / 2);
+    const a = [p1[0] - ((p1[0] - p0[0]) / d1) * r1, p1[1] - ((p1[1] - p0[1]) / d1) * r1];
+    const b = [p1[0] + ((p2[0] - p1[0]) / d2) * r2, p1[1] + ((p2[1] - p1[1]) / d2) * r2];
+    d += ` L${a[0].toFixed(1)},${a[1].toFixed(1)} Q${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${b[0].toFixed(1)},${b[1].toFixed(1)}`;
+  }
+  const last = pts[pts.length - 1];
+  d += ` L${last[0].toFixed(1)},${last[1].toFixed(1)}`;
+  return d;
+}
+
+/** 路口放大圖：灰色路面構成完整路口、洋紅色路徑箭頭（Garmin 式） */
 function renderJunctionSVG(jv) {
-  const pts = jv.pts;
-  const d = 'M' + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L');
-  const [x1, y1] = pts[pts.length - 2];
-  const [x2, y2] = pts[pts.length - 1];
+  const routeD = roundedPath(jv.route);
+  const roadsD = jv.roads
+    .map((r) => 'M' + r.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L'))
+    .join(' ');
+  const allRoadsD = `${routeD} ${roadsD}`;
+  const [x1, y1] = jv.route[jv.route.length - 2];
+  const [x2, y2] = jv.route[jv.route.length - 1];
   const ang = (Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI + 90;
   return `<svg viewBox="0 0 300 300">
-    <path d="${d}" stroke="#aeb6bd" stroke-width="38" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="${d}" stroke="#e9edf0" stroke-width="30" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="${d}" stroke="#d81b8c" stroke-width="13" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect width="300" height="300" fill="#eef2f5"/>
+    <path d="${allRoadsD}" stroke="#b9c1c9" stroke-width="30" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${allRoadsD}" stroke="#e4e8eb" stroke-width="24" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${routeD}" stroke="#d81b8c" stroke-width="10" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
     <g transform="translate(${x2.toFixed(1)},${y2.toFixed(1)}) rotate(${ang.toFixed(1)})">
-      <path d="M0,-20 L14,10 L0,3 L-14,10 Z" fill="#d81b8c"/>
+      <path d="M0,-16 L11,8 L0,2 L-11,8 Z" fill="#d81b8c"/>
     </g>
   </svg>`;
 }
@@ -636,6 +661,7 @@ function updateNavHUD(s) {
 function exitNavigation(clearAll = false) {
   if (navigator_) { navigator_.stop(); navigator_ = null; }
   navigating = false;
+  document.body.classList.remove('navigating');
   clearRouteCameras();
   map.off('dragstart', onNavDrag);
   $('nav-hud').hidden = true;

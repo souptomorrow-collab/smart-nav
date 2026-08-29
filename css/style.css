@@ -314,3 +314,5 @@ input { font-family: inherit; }
 /* Mapbox 控制項位置微調 */
 .mapboxgl-ctrl-bottom-right { margin-bottom: calc(60px + var(--safe-bottom)); }
 .mapboxgl-ctrl-top-right { margin-top: calc(60px + var(--safe-top)); }
+/* 導航中隱藏右上控制項，避免被路口放大圖擋住 */
+body.navigating .mapboxgl-ctrl-top-right { display: none; }

@@ -162,6 +162,14 @@ export function s2tw(text) {
   if (!text) return text;
   let t = String(text);
   for (const [re, rep] of S2T_WORDS) t = t.replace(re, rep);
+  // 單位口語化（台灣習慣）：千米 → 公里；1000 公尺以上改講公里
+  t = t.replace(/(\d+(?:\.\d+)?)\s*千米/g, '$1 公里');
+  t = t.replace(/(\d+(?:\.\d+)?)\s*公尺/g, (m0, num) => {
+    const v = parseFloat(num);
+    if (v < 1000) return m0;
+    const km = v / 1000;
+    return `${km % 1 === 0 ? km.toFixed(0) : km.toFixed(1)} 公里`;
+  });
   return t.replace(/[一-鿿]/g, (c) => S2T_CHARS[c] || c);
 }
 
