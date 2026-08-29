@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1a73e8">
+  <meta name="description" content="完整的網頁導航系統：搜尋、路線規劃、GPS 逐步導航、語音播報">
+  <title>智慧導航</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.29.0/mapbox-gl.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="map"></div>
+
+    <!-- ============ Mapbox 金鑰設定 ============ -->
+    <div id="token-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <h2>🗺️ 設定 Mapbox 存取金鑰</h2>
+        <p>本系統使用 Mapbox 地圖服務，需要一組免費的存取金鑰（Access Token）。</p>
+        <ol>
+          <li>前往 <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener">account.mapbox.com/access-tokens</a>（可免費註冊）</li>
+          <li>複製「Default public token」（以 <code>pk.</code> 開頭）</li>
+          <li>貼到下方欄位</li>
+        </ol>
+        <input id="token-input" type="text" placeholder="pk.eyJ1Ijoi..." autocomplete="off" spellcheck="false">
+        <div id="token-error" class="error-text" hidden></div>
+        <button id="token-save" class="btn-primary">儲存並開始使用</button>
+        <p class="hint">金鑰只會儲存在你自己的瀏覽器（localStorage），不會傳送到其他地方。</p>
+      </div>
+    </div>
+
+    <!-- ============ 頂部搜尋列 ============ -->
+    <div id="topbar">
+      <div id="search-box">
+        <button id="menu-btn" title="收藏與歷史" aria-label="選單">☰</button>
+        <input id="search-input" type="text" placeholder="搜尋地點、地址或座標" autocomplete="off">
+        <button id="search-clear" title="清除" aria-label="清除" hidden>✕</button>
+        <button id="route-btn" title="規劃路線" aria-label="規劃路線">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M21.71 11.29l-9-9a.996.996 0 0 0-1.41 0l-9 9a.996.996 0 0 0 0 1.41l9 9c.39.39 1.02.39 1.41 0l9-9a.996.996 0 0 0 0-1.41zM14 14.5V12h-4v3H8v-4c0-.55.45-1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/></svg>
+        </button>
+      </div>
+      <div id="search-results" class="dropdown" hidden></div>
+    </div>
+
+    <!-- ============ 路線規劃面板 ============ -->
+    <div id="route-panel" class="panel" hidden>
+      <div class="panel-header">
+        <div id="profile-tabs">
+          <button class="profile-tab active" data-profile="driving-traffic" title="開車">🚗</button>
+          <button class="profile-tab" data-profile="walking" title="步行">🚶</button>
+          <button class="profile-tab" data-profile="cycling" title="騎車">🚲</button>
+        </div>
+        <button id="route-close" class="icon-btn" title="關閉">✕</button>
+      </div>
+      <div id="stops-list"></div>
+      <div class="stops-actions">
+        <button id="add-stop" class="text-btn">＋ 新增停靠點</button>
+        <button id="swap-stops" class="text-btn" title="交換起訖點">⇅ 交換</button>
+      </div>
+      <div id="route-alternatives"></div>
+      <div id="route-loading" class="loading" hidden>路線計算中…</div>
+      <div id="route-error" class="error-text" hidden></div>
+      <div id="route-actions" hidden>
+        <button id="start-nav" class="btn-primary">🧭 開始導航</button>
+        <button id="start-sim" class="btn-secondary">▶ 模擬導航</button>
+      </div>
+    </div>
+
+    <!-- ============ 地點資訊卡 ============ -->
+    <div id="place-card" class="panel" hidden>
+      <div class="panel-header">
+        <h3 id="place-name"></h3>
+        <button id="place-close" class="icon-btn" title="關閉">✕</button>
+      </div>
+      <p id="place-address"></p>
+      <p id="place-coords" class="hint"></p>
+      <div class="card-actions">
+        <button id="place-navigate" class="btn-primary">🧭 導航到這裡</button>
+        <button id="place-origin" class="btn-secondary">出發點</button>
+        <button id="place-fav" class="btn-secondary">☆ 收藏</button>
+      </div>
+    </div>
+
+    <!-- ============ 收藏 / 歷史 抽屜 ============ -->
+    <div id="drawer" class="panel" hidden>
+      <div class="panel-header">
+        <div id="drawer-tabs">
+          <button class="drawer-tab active" data-tab="favorites">⭐ 收藏</button>
+          <button class="drawer-tab" data-tab="history">🕘 歷史</button>
+        </div>
+        <button id="drawer-close" class="icon-btn" title="關閉">✕</button>
+      </div>
+      <div id="drawer-list"></div>
+    </div>
+
+    <!-- ============ 右鍵 / 長按選單 ============ -->
+    <div id="ctx-menu" hidden>
+      <div id="ctx-coords" class="hint"></div>
+      <button id="ctx-navigate">🧭 導航到這裡</button>
+      <button id="ctx-origin">🚩 從這裡出發</button>
+      <button id="ctx-fav">⭐ 加入收藏</button>
+      <button id="ctx-whats-here">📍 這是哪裡？</button>
+    </div>
+
+    <!-- ============ 地圖工具（右下） ============ -->
+    <div id="map-tools">
+      <button id="tool-style" class="tool-btn" title="切換地圖樣式">🗺️</button>
+      <button id="tool-night" class="tool-btn" title="日間 / 夜間">🌙</button>
+      <button id="tool-traffic" class="tool-btn" title="即時路況">🚦</button>
+      <button id="tool-3d" class="tool-btn" title="2D / 3D">🏙️</button>
+    </div>
+
+    <!-- ============ 導航 HUD ============ -->
+    <div id="nav-hud" hidden>
+      <div id="nav-banner">
+        <div id="nav-icon"></div>
+        <div id="nav-banner-text">
+          <div id="nav-distance">--</div>
+          <div id="nav-instruction">準備出發</div>
+        </div>
+      </div>
+      <div id="nav-next" hidden>接著 <span id="nav-next-text"></span></div>
+      <button id="recenter-btn" hidden>📍 重新置中</button>
+      <div id="nav-bottom">
+        <div id="nav-speed">
+          <div id="speed-value">0</div>
+          <div class="speed-unit">km/h</div>
+        </div>
+        <div id="speed-limit" hidden><span id="speed-limit-value"></span></div>
+        <div id="nav-eta">
+          <div id="eta-time">--:--</div>
+          <div id="eta-detail">-- · --</div>
+        </div>
+        <div id="nav-buttons">
+          <button id="nav-overview" class="tool-btn" title="路線總覽">🗺️</button>
+          <button id="nav-mute" class="tool-btn" title="靜音">🔊</button>
+          <button id="nav-exit" class="tool-btn nav-exit" title="結束導航">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" hidden></div>
+  </div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.29.0/mapbox-gl.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
