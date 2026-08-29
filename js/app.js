@@ -325,12 +325,19 @@ function renderRouteCards() {
   const routes = routeState.routes;
   wrap.innerHTML = routes.map((r, i) => {
     const via = r.legs && r.legs[0] && r.legs[0].summary ? `經 ${escapeHtml(r.legs[0].summary)}` : '';
+    // 與平常路況相比的延誤（driving-traffic 才有 duration_typical）
+    let delayTxt = '';
+    if (r.duration_typical) {
+      const delayMin = Math.round((r.duration - r.duration_typical) / 60);
+      if (delayMin >= 3) delayTxt = ` · <span class="rc-delay">車多 +${delayMin} 分</span>`;
+      else if (delayMin <= -3) delayTxt = ' · <span class="rc-smooth">路況順暢</span>';
+    }
     return `<button class="route-card${i === routeState.selectedIndex ? ' selected' : ''}" data-i="${i}">
       <div class="rc-main">
         <span class="rc-duration">${fmtDuration(r.duration)}</span>
         <span class="rc-distance">${fmtDistance(r.distance)}</span>
       </div>
-      <div class="rc-via">${i === 0 ? '建議路線' : '替代路線'}${via ? ' · ' + via : ''} · 抵達 ${fmtETA(r.duration)}</div>
+      <div class="rc-via">${i === 0 ? '建議路線' : '替代路線'}${via ? ' · ' + via : ''} · 抵達 ${fmtETA(r.duration)}${delayTxt}</div>
     </button>`;
   }).join('') + renderStepsList(routes[routeState.selectedIndex]);
 
@@ -426,15 +433,15 @@ function startNavigation(simulate) {
   map.on('dragstart', onNavDrag);
 }
 
-// ---- 路線上的測速照相圖示 ----
-function ensureCameraIcon() {
-  if (map.hasImage('cam-icon')) return;
+// ---- 路線上的測速照相 / 科技執法圖示 ----
+function makeAlertIcon(name, bgColor, emoji) {
+  if (map.hasImage(name)) return;
   const c = document.createElement('canvas');
   c.width = c.height = 44;
   const ctx = c.getContext('2d');
   ctx.beginPath();
   ctx.arc(22, 22, 20, 0, Math.PI * 2);
-  ctx.fillStyle = '#c62828';
+  ctx.fillStyle = bgColor;
   ctx.fill();
   ctx.lineWidth = 3;
   ctx.strokeStyle = '#fff';
@@ -442,8 +449,8 @@ function ensureCameraIcon() {
   ctx.font = '20px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('📷', 22, 23);
-  map.addImage('cam-icon', ctx.getImageData(0, 0, 44, 44));
+  ctx.fillText(emoji, 22, 23);
+  map.addImage(name, ctx.getImageData(0, 0, 44, 44));
 }
 
 function showRouteCameras() {
@@ -451,14 +458,15 @@ function showRouteCameras() {
   const cams = (navigator_ && navigator_.routeCameras) || [];
   if (!cams.length) return;
   try {
-    ensureCameraIcon();
+    makeAlertIcon('cam-icon', '#c62828', '📷');
+    makeAlertIcon('enf-icon', '#1565c0', '📸');
     map.addSource('nav-cameras', {
       type: 'geojson',
       data: {
         type: 'FeatureCollection',
         features: cams.map((c) => ({
           type: 'Feature',
-          properties: {},
+          properties: { kind: c.kind },
           geometry: { type: 'Point', coordinates: c.lngLat },
         })),
       },
@@ -467,7 +475,11 @@ function showRouteCameras() {
       id: 'nav-cameras-layer',
       type: 'symbol',
       source: 'nav-cameras',
-      layout: { 'icon-image': 'cam-icon', 'icon-size': 0.9, 'icon-allow-overlap': true },
+      layout: {
+        'icon-image': ['match', ['get', 'kind'], 'tech', 'enf-icon', 'cam-icon'],
+        'icon-size': 0.9,
+        'icon-allow-overlap': true,
+      },
     });
   } catch { /* 樣式尚未就緒時忽略 */ }
 }
@@ -487,13 +499,24 @@ function updateNavHUD(s) {
   $('nav-distance').textContent = fmtDistance(s.distToManeuver);
   $('nav-instruction').textContent = s.instruction;
   $('nav-icon').innerHTML = s.iconSVG;
-  // 車道指引列
+  // 車道指引列（每條車道顯示其全部方向箭頭，可走方向亮白）
   if (s.lanes && s.lanes.length) {
-    const key = s.lanes.map((l) => `${l.direction}${l.active ? 1 : 0}`).join(',');
+    const key = s.lanes
+      .map((l) => `${l.directions.join('+')}|${l.activeDirection || ''}|${l.active ? 1 : 0}`)
+      .join(',');
     if (key !== lastLanesKey) {
       lastLanesKey = key;
       $('nav-lanes').innerHTML = s.lanes
-        .map((l) => `<span class="lane${l.active ? ' active' : ''}">${laneIconSVG(l.direction, l.active)}</span>`)
+        .map((l) => {
+          const arrows = l.directions
+            .map((d) => {
+              const emph = !l.active ? 'off'
+                : (!l.activeDirection || d === l.activeDirection) ? 'on' : 'mid';
+              return laneIconSVG(d, emph);
+            })
+            .join('');
+          return `<span class="lane${l.active ? ' active' : ''}">${arrows}</span>`;
+        })
         .join('');
     }
     $('nav-lanes').hidden = false;
@@ -501,14 +524,30 @@ function updateNavHUD(s) {
     $('nav-lanes').hidden = true;
     lastLanesKey = '';
   }
-  // 測速照相警示
+  // 測速照相 / 科技執法警示
   if (s.camera) {
-    $('nav-camera-text').textContent =
-      `測速照相 ${fmtDistance(s.camera.dist)}${s.camera.limit ? ` · 速限 ${s.camera.limit}` : ''}`;
-    $('nav-camera').classList.toggle('overspeed', !!(s.camera.limit && s.speedKmh > s.camera.limit));
+    if (s.camera.kind === 'tech') {
+      const short = (s.camera.desc || '').slice(0, 14);
+      $('nav-camera-text').textContent =
+        `📸 科技執法 ${fmtDistance(s.camera.dist)}${short ? ` · ${short}` : ''}`;
+      $('nav-camera').classList.remove('overspeed');
+    } else {
+      $('nav-camera-text').textContent =
+        `📷 測速照相 ${fmtDistance(s.camera.dist)}${s.camera.limit ? ` · 速限 ${s.camera.limit}` : ''}`;
+      $('nav-camera').classList.toggle('overspeed', !!(s.camera.limit && s.speedKmh > s.camera.limit));
+    }
     $('nav-camera').hidden = false;
   } else {
     $('nav-camera').hidden = true;
+  }
+  // 前方壅塞警示
+  if (s.congestion) {
+    $('nav-traffic-text').textContent =
+      `🚗 ${s.congestion.severe ? '嚴重壅塞' : '車多壅塞'} ${s.congestion.dist < 100 ? '進入路段' : fmtDistance(s.congestion.dist)} · 長約 ${fmtDistance(s.congestion.len)}`;
+    $('nav-traffic').classList.toggle('severe', !!s.congestion.severe);
+    $('nav-traffic').hidden = false;
+  } else {
+    $('nav-traffic').hidden = true;
   }
   if (s.nextInstruction) {
     $('nav-next-text').textContent = s.nextInstruction;

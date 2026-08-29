@@ -1,7 +1,7 @@
 // ============ 逐步導航引擎 ============
 // GPS 追蹤、路線吸附、轉彎提示、語音播報、偏航重規劃、模擬導航
 import {
-  distance, bearing, snapToLine, cumulativeDistances, interpolate,
+  distance, bearing, snapToLine, cumulativeDistances, interpolate, fmtDistance,
 } from './utils.js';
 import { speak } from './voice.js';
 import { fetchRoutes } from './routing.js';
@@ -27,9 +27,14 @@ export function maneuverIconSVG(type, modifier, color = '#fff') {
   return `<svg viewBox="0 0 48 48"><g transform="rotate(${angle} 24 24)"><path fill="${color}" d="M24 5l11 15h-8v23h-6V20h-8z"/></g></svg>`;
 }
 
-/** 單一車道的箭頭圖示 */
-export function laneIconSVG(direction, active) {
-  const color = active ? '#ffffff' : 'rgba(255,255,255,.32)';
+/**
+ * 單一車道箭頭圖示。
+ * emphasis：'on' 亮白（可走方向）/ 'mid' 半亮（可走車道的其他方向）/ 'off' 變暗（不可走）
+ */
+export function laneIconSVG(direction, emphasis) {
+  const color = emphasis === 'on' ? '#ffffff'
+    : emphasis === 'mid' ? 'rgba(255,255,255,.5)'
+    : 'rgba(255,255,255,.26)';
   const angle = MOD_ANGLES[direction] ?? 0;
   if (direction === 'uturn') {
     return `<svg viewBox="0 0 48 48"><path fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round" d="M18 42V21a8 8 0 0 1 16 0v6"/><path fill="${color}" d="M34 38l-7-10h14z"/></svg>`;
@@ -38,40 +43,53 @@ export function laneIconSVG(direction, active) {
 }
 
 /**
- * 依可走車道位置合成中文語音提示；沒有需要提示的情況回傳 null
- * lanes: [{ active, direction }]，由左至右
+ * 依可走車道位置合成詳細中文語音提示；不需提示時回傳 null
+ * lanes: [{ active, activeDirection, directions }]，由左至右
+ * modifier: 下一個轉彎方向（配合提示「準備左轉」等）
  */
-function laneHint(lanes) {
+function laneHint(lanes, modifier) {
   const n = lanes.length;
   const act = lanes.map((l, i) => (l.active ? i : -1)).filter((i) => i >= 0);
   if (!act.length || act.length === n) return null; // 全部可走就不用提醒
-  const leftMost = act[0];
-  const rightMost = act[act.length - 1];
   const k = act.length;
-  if (rightMost < n / 2) {
-    if (k === 1) return leftMost === 0 ? '請靠左，走最左側車道' : `請走左邊第 ${leftMost + 1} 車道`;
-    return `請靠左行駛，左側 ${k} 條車道皆可`;
+  const L = act[0];
+  const R = act[act.length - 1];
+  const contiguous = R - L + 1 === k;
+  let pos;
+  if (contiguous && L === 0) {
+    pos = k === 1 ? '請走最左側車道' : `請走左側 ${k} 條車道`;
+  } else if (contiguous && R === n - 1) {
+    pos = k === 1 ? '請走最右側車道' : `請走右側 ${k} 條車道`;
+  } else if ((L + R) / 2 < (n - 1) / 2) {
+    pos = `請走左邊第 ${act.map((i) => i + 1).join('、')} 車道`;
+  } else {
+    pos = `請走右邊第 ${act.map((i) => n - i).reverse().join('、')} 車道`;
   }
-  if (leftMost >= n / 2) {
-    if (k === 1) return rightMost === n - 1 ? '請靠右，走最右側車道' : `請走右邊第 ${n - rightMost} 車道`;
-    return `請靠右行駛，右側 ${k} 條車道皆可`;
-  }
-  return '請走中間車道';
+  const dirTxt = {
+    left: '準備左轉', right: '準備右轉',
+    'sharp left': '準備左轉', 'sharp right': '準備右轉',
+    'slight left': '準備靠左', 'slight right': '準備靠右',
+    uturn: '準備迴轉',
+  }[modifier] || '';
+  return `前方共 ${n} 線道，${pos}${dirTxt ? '，' + dirTxt : ''}`;
 }
 
-// ---- 測速照相資料 ----
+// ---- 測速照相 / 科技執法資料 ----
 let CAMERAS = null;
+let ENFORCE = null;
 
-/** 載入內建的全台固定式測速照相資料（警政署開放資料） */
+/** 載入內建的全台固定式測速照相與科技執法資料（政府開放資料） */
 export async function loadSpeedCameras() {
-  if (CAMERAS) return CAMERAS;
-  try {
-    const res = await fetch('data/speed-cameras.json');
-    CAMERAS = await res.json();
-  } catch {
-    CAMERAS = [];
+  if (!CAMERAS) {
+    try {
+      CAMERAS = await (await fetch('data/speed-cameras.json')).json();
+    } catch { CAMERAS = []; }
   }
-  return CAMERAS;
+  if (!ENFORCE) {
+    try {
+      ENFORCE = await (await fetch('data/enforcement.json')).json();
+    } catch { ENFORCE = []; }
+  }
 }
 
 function bearingToChar(brg) {
@@ -171,13 +189,13 @@ export class Navigator {
     this.offRouteCounter = 0;
     this.simAlong = 0;
     this.computeRouteCameras();
+    this.computeCongestionZones(route);
   }
 
-  /** 找出路線沿途的測速照相桿（含拍攝方向比對，反向的不列入） */
+  /** 找出路線沿途的測速照相桿與科技執法點（照相桿含拍攝方向比對，反向不列入） */
   computeRouteCameras() {
     this.routeCameras = [];
     this.camSpoken = new Set();
-    if (!CAMERAS || !CAMERAS.length) return;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const c of this.navCoords) {
       if (c[0] < minX) minX = c[0];
@@ -186,17 +204,70 @@ export class Navigator {
       if (c[1] > maxY) maxY = c[1];
     }
     const pad = 0.001; // 約 100 公尺
-    for (const cam of CAMERAS) {
+    const inBox = (lng, lat) =>
+      lng >= minX - pad && lng <= maxX + pad && lat >= minY - pad && lat <= maxY + pad;
+
+    for (const cam of CAMERAS || []) {
       const [lng, lat, limit, direct] = cam;
-      if (lng < minX - pad || lng > maxX + pad || lat < minY - pad || lat > maxY + pad) continue;
+      if (!inBox(lng, lat)) continue;
       const snap = snapToLine([lng, lat], this.navCoords, this.cumDist);
       if (snap.dist > 50) continue;
       const dirChar = bearingToChar(this.bearingAt(snap.along));
       const dirChars = ['東', '西', '南', '北'].filter((ch) => direct.includes(ch));
       if (dirChars.length && !dirChars.includes(dirChar)) continue;
-      this.routeCameras.push({ along: snap.along, lngLat: [lng, lat], limit });
+      this.routeCameras.push({ kind: 'speed', along: snap.along, lngLat: [lng, lat], limit });
+    }
+    for (const e of ENFORCE || []) {
+      const [lng, lat, desc] = e;
+      if (!inBox(lng, lat)) continue;
+      const snap = snapToLine([lng, lat], this.navCoords, this.cumDist);
+      if (snap.dist > 55) continue;
+      this.routeCameras.push({ kind: 'tech', along: snap.along, lngLat: [lng, lat], desc });
     }
     this.routeCameras.sort((a, b) => a.along - b.along);
+    // 同路口兩支相同取締項目的科技執法只保留一筆
+    this.routeCameras = this.routeCameras.filter((c, i, arr) => {
+      if (i === 0) return true;
+      const p = arr[i - 1];
+      return !(c.kind === 'tech' && p.kind === 'tech' && c.along - p.along < 35 && c.desc === p.desc);
+    });
+  }
+
+  /** 從壅塞標註找出路線上的壅塞區段（heavy / severe） */
+  computeCongestionZones(route) {
+    this.congestionZones = [];
+    this.congSpoken = new Set();
+    let cong = [];
+    for (const leg of route.legs || []) {
+      if (leg.annotation && leg.annotation.congestion) cong = cong.concat(leg.annotation.congestion);
+    }
+    const geo = route.geometry.coordinates;
+    if (!cong.length || geo.length < 2) return;
+    const cum = cumulativeDistances(geo);
+    const raw = [];
+    let z = null;
+    for (let i = 0; i < geo.length - 1 && i < cong.length; i++) {
+      const bad = cong[i] === 'heavy' || cong[i] === 'severe';
+      if (bad) {
+        if (!z) z = { start: cum[i], end: cum[i + 1], severe: cong[i] === 'severe' };
+        else { z.end = cum[i + 1]; if (cong[i] === 'severe') z.severe = true; }
+      } else if (z) {
+        raw.push(z);
+        z = null;
+      }
+    }
+    if (z) raw.push(z);
+    // 中間有短暫順暢（<150 公尺）的壅塞區合併，且只保留 250 公尺以上的區段
+    for (const r of raw) {
+      const last = this.congestionZones[this.congestionZones.length - 1];
+      if (last && r.start - last.end < 150) {
+        last.end = r.end;
+        last.severe = last.severe || r.severe;
+      } else {
+        this.congestionZones.push(r);
+      }
+    }
+    this.congestionZones = this.congestionZones.filter((m) => m.end - m.start >= 250);
   }
 
   // ---- GPS 追蹤 ----
@@ -332,14 +403,18 @@ export class Navigator {
       if (laneComps.length) {
         lanes = laneComps.map((c) => ({
           active: !!c.active,
-          direction: (c.active && c.active_direction) || (c.directions && c.directions[0]) || 'straight',
+          activeDirection: c.active_direction || null,
+          directions: c.directions && c.directions.length ? c.directions : ['straight'],
         }));
       }
     }
     // 車道語音提示：每個路口只說一次
     if (lanes && !this.laneSpoken.has(csi) && distToManeuver > 40) {
-      const hint = laneHint(lanes);
       this.laneSpoken.add(csi);
+      const nextMod = this.flatSteps[csi + 1]
+        ? this.flatSteps[csi + 1].step.maneuver.modifier
+        : cur.step.maneuver.modifier;
+      const hint = laneHint(lanes, nextMod);
       if (hint) speak(hint, { interrupt: false });
     }
 
@@ -360,7 +435,7 @@ export class Navigator {
       }
     }
 
-    // 測速照相提醒
+    // 測速照相 / 科技執法提醒
     let camera = null;
     const speedKmh = Math.round(Math.max(0, speedMs) * 3.6);
     if (this.routeCameras && this.routeCameras.length) {
@@ -369,15 +444,44 @@ export class Navigator {
         if (c.along > along - 20) {
           const d = Math.max(0, c.along - along);
           if (d <= 800) {
-            camera = { dist: d, limit: c.limit };
+            camera = { kind: c.kind, dist: d, limit: c.limit, desc: c.desc };
             if (!this.camSpoken.has(i) && d <= 500) {
               this.camSpoken.add(i);
-              const dTxt = d >= 100 ? `${Math.round(d / 50) * 50} 公尺` : '';
-              speak(`前方${dTxt ? ' ' + dTxt : ''}測速照相${c.limit ? `，速限 ${c.limit}` : ''}`, { interrupt: false });
+              const dTxt = d >= 100 ? ` ${Math.round(d / 50) * 50} 公尺` : '';
+              if (c.kind === 'speed') {
+                speak(`前方${dTxt}測速照相${c.limit ? `，速限 ${c.limit}` : ''}`, { interrupt: false });
+              } else {
+                const short = (c.desc || '').split(/[、，,（(]/).slice(0, 2).join('、');
+                speak(`前方${dTxt}科技執法${short ? `，取締${short}` : ''}`, { interrupt: false });
+              }
             }
-            if (c.limit && speedKmh > c.limit && d <= 600 && !this.camSpoken.has('os' + i)) {
+            if (c.kind === 'speed' && c.limit && speedKmh > c.limit && d <= 600 && !this.camSpoken.has('os' + i)) {
               this.camSpoken.add('os' + i);
               speak(`注意，您已超速，速限 ${c.limit}`, { interrupt: false });
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // 前方壅塞預警
+    let congestion = null;
+    if (this.congestionZones && this.congestionZones.length) {
+      for (let i = 0; i < this.congestionZones.length; i++) {
+        const zn = this.congestionZones[i];
+        if (zn.end > along + 50) {
+          const d = zn.start - along;
+          if (d <= 1500) {
+            congestion = {
+              dist: Math.max(0, d),
+              len: zn.end - Math.max(zn.start, along),
+              severe: zn.severe,
+            };
+            if (!this.congSpoken.has(i) && d <= 1000) {
+              this.congSpoken.add(i);
+              const where = d > 100 ? `前方 ${fmtDistance(d)}` : '前方';
+              speak(`${where}${zn.severe ? '嚴重壅塞' : '車多壅塞'}，路段長約 ${fmtDistance(zn.end - zn.start)}`, { interrupt: false });
             }
           }
           break;
@@ -416,6 +520,7 @@ export class Navigator {
       distToManeuver,
       lanes,
       camera,
+      congestion,
       instruction: upcoming.instruction,
       iconSVG: maneuverIconSVG(upcoming.type, upcoming.modifier),
       nextInstruction:

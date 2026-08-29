@@ -219,6 +219,15 @@ input { font-family: inherit; }
   0%, 100% { background: #c62828; }
   50% { background: #7f0000; }
 }
+#nav-traffic {
+  background: #e65100; color: #fff; border-radius: 10px;
+  padding: 8px 16px; font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+  box-shadow: var(--shadow);
+}
+#nav-traffic.severe { background: #8e24aa; }
+.rc-delay { color: #d93025; font-weight: 600; }
+.rc-smooth { color: #188038; font-weight: 600; }
 #nav-next {
   background: rgba(15,81,50,.85); color: #fff; border-radius: 8px;
   padding: 6px 18px; font-size: 13px;
