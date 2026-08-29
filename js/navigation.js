@@ -362,8 +362,29 @@ export class Navigator {
 
   // ---- 模擬導航 ----
   startSimulation() {
-    const TICK = 500; // ms
     this.simAlong = 0;
+    this.paused = false;
+    this.startSimTicker();
+  }
+
+  /** 暫停 / 繼續模擬。回傳目前是否為暫停狀態 */
+  togglePause() {
+    if (!this.simulate || !this.active) return false;
+    if (this.paused) {
+      this.paused = false;
+      this.startSimTicker();
+    } else {
+      this.paused = true;
+      if (this.simTimer !== null) {
+        clearInterval(this.simTimer);
+        this.simTimer = null;
+      }
+    }
+    return this.paused;
+  }
+
+  startSimTicker() {
+    const TICK = 500; // ms
     this.simTimer = setInterval(() => {
       // 優先以該路段的最高速限行駛；沒有速限資料時退回路段平均速度
       let v = null;
@@ -484,17 +505,33 @@ export class Navigator {
         }));
       }
     }
-    // 車道語音提示：每個路口只說一次
-    if (lanes && !this.laneSpoken.has(csi) && distToManeuver > 40) {
-      this.laneSpoken.add(csi);
-      const nextFs = this.flatSteps[csi + 1];
-      const nextMod = nextFs ? nextFs.step.maneuver.modifier : cur.step.maneuver.modifier;
-      const roadName = `${cur.step.name || ''} ${(nextFs && nextFs.step.name) || ''}`;
-      const hint = laneHint(lanes, nextMod, {
-        freeway: /國道|高速公路|快速道路|高架|快速公路/.test(roadName),
-        driving: this.profile.startsWith('driving'),
-      });
-      if (hint) speak(hint, { interrupt: false });
+    // 車道語音提示：每個路口只說一次。
+    // 有車道資料 → 詳細指引；沒有 → 依轉向推論快慢車道
+    const laneFs = this.flatSteps[csi + 1];
+    const laneMod = laneFs ? laneFs.step.maneuver.modifier : cur.step.maneuver.modifier;
+    const laneRoad = `${cur.step.name || ''} ${(laneFs && laneFs.step.name) || ''}`;
+    const isFreeway = /國道|高速公路|快速道路|高架|快速公路/.test(laneRoad);
+    if (!this.laneSpoken.has(csi) && distToManeuver > 40) {
+      if (lanes) {
+        this.laneSpoken.add(csi);
+        const hint = laneHint(lanes, laneMod, {
+          freeway: isFreeway,
+          driving: this.profile.startsWith('driving'),
+        });
+        if (hint) speak(hint, { interrupt: false });
+      } else if (this.profile.startsWith('driving') && distToManeuver <= 320) {
+        this.laneSpoken.add(csi);
+        const t = {
+          right: isFreeway ? '請靠外側車道，準備右轉' : '前方右轉，請先切換到外側慢車道',
+          'sharp right': isFreeway ? '請靠外側車道，準備右轉' : '前方右轉，請先切換到外側慢車道',
+          left: isFreeway ? '請靠內側車道，準備左轉' : '前方左轉，請先切換到內側快車道',
+          'sharp left': isFreeway ? '請靠內側車道，準備左轉' : '前方左轉，請先切換到內側快車道',
+          uturn: '前方迴轉，請先切換到內側快車道',
+          'slight right': '前方靠右，請靠右側車道行駛',
+          'slight left': '前方靠左，請靠左側車道行駛',
+        }[laneMod];
+        if (t) speak(t, { interrupt: false });
+      }
     }
 
     // 剩餘距離 / 時間
@@ -576,7 +613,21 @@ export class Navigator {
       const angle = Math.abs(MOD_ANGLES[nm.modifier] ?? 0);
       const complexType = /fork|ramp|roundabout|rotary|merge|end of road/.test(nm.type || '');
       if (lanes || complexType || angle >= 35) {
-        if (!this._jv || this._jv.key !== csi) this._jv = this.buildJunctionView(csi);
+        if (!this._jv || this._jv.key !== csi) {
+          this._jv = this.buildJunctionView(csi);
+          if (this._jv) {
+            // 路口圖上的快慢車道文字提示
+            this._jv.hint = {
+              right: isFreeway ? '靠外側車道右轉' : '靠外側慢車道右轉',
+              'sharp right': isFreeway ? '靠外側車道右轉' : '靠外側慢車道右轉',
+              left: isFreeway ? '靠內側車道左轉' : '靠內側快車道左轉',
+              'sharp left': isFreeway ? '靠內側車道左轉' : '靠內側快車道左轉',
+              uturn: '靠內側快車道迴轉',
+              'slight right': '靠右行駛',
+              'slight left': '靠左行駛',
+            }[nm.modifier] || null;
+          }
+        }
         junction = this._jv;
       }
     }
@@ -748,16 +799,36 @@ export class Navigator {
     const route = simplifyPath(pts.map(toCanvas), 4);
     if (route.length < 2) return null;
 
-    // 兩條灰色延伸段：沒轉彎會走的直行方向 + 轉入道路的另一端
-    const mPt = toCanvas(m);
-    const contBrg = this.bearingAt(Math.max(0, mDist - 5));
-    const exitBrg = this.bearingAt(Math.min(this.total, mDist + 12));
-    const roads = [[mPt, toCanvas(destination(m, STUB, contBrg))]];
-    // 轉角明顯時才畫轉入道路的反向端（避免直行時重疊）
-    let diff = Math.abs(exitBrg - contBrg);
-    if (diff > 180) diff = 360 - diff;
-    if (diff > 25) {
-      roads.push([mPt, toCanvas(destination(m, STUB, (exitBrg + 180) % 360))]);
+    // 用路線資料中的真實路口（intersections）畫出所有道路臂：
+    // 包括轉彎前會經過的小路，避免提早轉錯
+    const roads = [];
+    const nodes = [];
+    for (const fs of [this.flatSteps[csi], nx]) {
+      if (fs && fs.step.intersections) nodes.push(...fs.step.intersections);
+    }
+    for (const it of nodes) {
+      if (!it.location || !it.bearings) continue;
+      const snap = snapToLine(it.location, this.navCoords, this.cumDist);
+      if (snap.dist > 30) continue;
+      if (snap.along < mDist - BEFORE || snap.along > mDist + AFTER) continue;
+      const isManeuver = Math.abs(snap.along - mDist) < 15;
+      const armLen = isManeuver ? STUB : 26;
+      const nodePt = toCanvas(it.location);
+      for (const b of it.bearings) {
+        roads.push([nodePt, toCanvas(destination(it.location, armLen, b))]);
+      }
+    }
+    // 沒有路口資料時退回簡單畫法：直行延伸 + 轉入道路另一端
+    if (!roads.length) {
+      const mPt = toCanvas(m);
+      const contBrg = this.bearingAt(Math.max(0, mDist - 5));
+      const exitBrg = this.bearingAt(Math.min(this.total, mDist + 12));
+      roads.push([mPt, toCanvas(destination(m, STUB, contBrg))]);
+      let diff = Math.abs(exitBrg - contBrg);
+      if (diff > 180) diff = 360 - diff;
+      if (diff > 25) {
+        roads.push([mPt, toCanvas(destination(m, STUB, (exitBrg + 180) % 360))]);
+      }
     }
     return { key: csi, route, roads };
   }

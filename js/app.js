@@ -441,6 +441,8 @@ function startNavigation(simulate) {
   $('map-tools').hidden = true;
   $('nav-hud').hidden = false;
   $('nav-mute').textContent = isMuted() ? '🔇' : '🔊';
+  $('nav-pause').hidden = !simulate;
+  $('nav-pause').textContent = '⏸';
   navigating = true;
 
   navigator_ = new Navigator(map, {
@@ -625,6 +627,12 @@ function updateNavHUD(s) {
     if (s.junction.key !== lastJunctionKey) {
       lastJunctionKey = s.junction.key;
       $('junction-svg').innerHTML = renderJunctionSVG(s.junction);
+      if (s.junction.hint) {
+        $('junction-hint').textContent = `🚗 ${s.junction.hint}`;
+        $('junction-hint').hidden = false;
+      } else {
+        $('junction-hint').hidden = true;
+      }
     }
     $('junction-dist').textContent = fmtDistance(s.distToManeuver);
     $('nav-junction').hidden = false;
@@ -684,6 +692,12 @@ function exitNavigation(clearAll = false) {
 
 function setupNavHUD() {
   $('nav-exit').addEventListener('click', () => exitNavigation(false));
+  $('nav-pause').addEventListener('click', () => {
+    if (!navigator_) return;
+    const paused = navigator_.togglePause();
+    $('nav-pause').textContent = paused ? '▶' : '⏸';
+    toast(paused ? '模擬已暫停，可自由拖曳地圖查看' : '繼續模擬');
+  });
   $('nav-overview').addEventListener('click', () => { if (navigator_) navigator_.overview(); });
   $('recenter-btn').addEventListener('click', () => { if (navigator_) navigator_.setFollowing(true); });
   $('nav-mute').addEventListener('click', () => {
