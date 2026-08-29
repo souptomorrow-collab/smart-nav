@@ -518,6 +518,24 @@ function onNavDrag() {
 }
 
 let lastLanesKey = '';
+let lastJunctionKey = null;
+
+/** 路口放大圖：以 Garmin 式洋紅色粗箭頭沿實際路線幾何繪製 */
+function renderJunctionSVG(jv) {
+  const pts = jv.pts;
+  const d = 'M' + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L');
+  const [x1, y1] = pts[pts.length - 2];
+  const [x2, y2] = pts[pts.length - 1];
+  const ang = (Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI + 90;
+  return `<svg viewBox="0 0 300 300">
+    <path d="${d}" stroke="#aeb6bd" stroke-width="38" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${d}" stroke="#e9edf0" stroke-width="30" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${d}" stroke="#d81b8c" stroke-width="13" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(${x2.toFixed(1)},${y2.toFixed(1)}) rotate(${ang.toFixed(1)})">
+      <path d="M0,-20 L14,10 L0,3 L-14,10 Z" fill="#d81b8c"/>
+    </g>
+  </svg>`;
+}
 
 function updateNavHUD(s) {
   $('nav-distance').textContent = fmtDistance(s.distToManeuver);
@@ -563,6 +581,18 @@ function updateNavHUD(s) {
     $('nav-camera').hidden = false;
   } else {
     $('nav-camera').hidden = true;
+  }
+  // 路口放大圖
+  if (s.junction) {
+    if (s.junction.key !== lastJunctionKey) {
+      lastJunctionKey = s.junction.key;
+      $('junction-svg').innerHTML = renderJunctionSVG(s.junction);
+    }
+    $('junction-dist').textContent = fmtDistance(s.distToManeuver);
+    $('nav-junction').hidden = false;
+  } else {
+    $('nav-junction').hidden = true;
+    lastJunctionKey = null;
   }
   // 前方壅塞警示
   if (s.congestion) {

@@ -227,6 +227,7 @@ export class Navigator {
     this.laneSpoken = new Set();
     this.currentStepIndex = 0;
     this.lastTurnIdx = -1;
+    this._jv = null;
     this.offRouteCounter = 0;
     this.simAlong = 0;
     this.computeRouteCameras();
@@ -534,16 +535,34 @@ export class Navigator {
       }
     }
 
-    // 相機跟隨
+    // 路口放大圖（開車、接近有車道資料或明顯轉向的路口時顯示）
+    let junction = null;
+    const nxFs = this.flatSteps[csi + 1];
+    if (this.profile.startsWith('driving') && nxFs && distToManeuver <= 350 && distToManeuver > 12) {
+      const nm = nxFs.step.maneuver;
+      const angle = Math.abs(MOD_ANGLES[nm.modifier] ?? 0);
+      const complexType = /fork|ramp|roundabout|rotary|merge|end of road/.test(nm.type || '');
+      if (lanes || complexType || angle >= 35) {
+        if (!this._jv || this._jv.key !== csi) this._jv = this.buildJunctionView(csi);
+        junction = this._jv;
+      }
+    }
+
+    // 相機跟隨（接近路口時自動拉近放大）
     if (this.following) {
       const now = Date.now();
       if (now - this.lastCamera > 700) {
         this.lastCamera = now;
-        const zoom = speedMs > 22 ? 16.2 : speedMs > 12 ? 17.2 : 18;
+        let zoom = speedMs > 22 ? 16.2 : speedMs > 12 ? 17.2 : 18;
+        let pitch = 55;
+        if (this.profile.startsWith('driving') && distToManeuver < 240) {
+          zoom = Math.max(zoom, 18.3);
+          pitch = 60;
+        }
         this.map.easeTo({
           center: displayPos,
           bearing: brg,
-          pitch: 55,
+          pitch,
           zoom,
           duration: 900,
           padding: { top: Math.round(window.innerHeight * 0.35), bottom: 0, left: 0, right: 0 },
@@ -566,6 +585,7 @@ export class Navigator {
       lanes,
       camera,
       congestion,
+      junction,
       instruction: upcoming.instruction,
       iconSVG: maneuverIconSVG(upcoming.type, upcoming.modifier),
       nextInstruction:
@@ -654,6 +674,52 @@ export class Navigator {
         geometry: { type: 'Point', coordinates: head },
       }],
     });
+  }
+
+  /**
+   * 建立路口放大圖資料：取轉彎點前 110 / 後 85 公尺的路線幾何，
+   * 投影到平面並旋轉成「行進方向朝上」，縮放進 300x300 畫布。
+   */
+  buildJunctionView(csi) {
+    const nx = this.flatSteps[csi + 1];
+    if (!nx) return null;
+    const mIdx = nx.startIdx;
+    const mDist = this.cumDist[mIdx];
+    const startD = Math.max(0, mDist - 110);
+    const endD = Math.min(this.total, mDist + 85);
+    const pts = [this.pointAt(startD)];
+    const iStart = this.lowerBound(this.cumDist, startD) + 1;
+    const iEnd = this.lowerBound(this.cumDist, endD);
+    for (let i = iStart; i <= iEnd; i++) pts.push(this.navCoords[i]);
+    pts.push(this.pointAt(endD));
+
+    // 以轉彎點為原點換算為公尺
+    const m = this.navCoords[mIdx];
+    const cosLat = Math.cos((m[1] * Math.PI) / 180);
+    const th = (this.bearingAt(Math.max(0, mDist - 25)) * Math.PI) / 180;
+    const proj = pts.map((p) => {
+      const x = (p[0] - m[0]) * 111320 * cosLat;
+      const y = (p[1] - m[1]) * 110540;
+      // 旋轉讓進入方向朝上（SVG 的 y 軸向下）
+      return [x * Math.cos(th) - y * Math.sin(th), -(x * Math.sin(th) + y * Math.cos(th))];
+    });
+    // 縮放置中到 300x300（留 45px 邊距）
+    const xs = proj.map((p) => p[0]);
+    const ys = proj.map((p) => p[1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const s = Math.min((300 - 90) / Math.max(maxX - minX, 40), (300 - 90) / Math.max(maxY - minY, 40));
+    const ox = (300 - s * (minX + maxX)) / 2;
+    const oy = (300 - s * (minY + maxY)) / 2;
+    const scaled = proj.map(([x, y]) => [x * s + ox, y * s + oy]);
+    // 去除過近的點讓路徑平滑
+    const clean = scaled.filter((p, i) => {
+      if (i === 0 || i === scaled.length - 1) return true;
+      const q = scaled[i - 1];
+      return Math.hypot(p[0] - q[0], p[1] - q[1]) > 3;
+    });
+    if (clean.length < 2) return null;
+    return { key: csi, pts: clean };
   }
 
   clearTurnArrow() {
