@@ -223,12 +223,21 @@ export class Navigator {
     const TICK = 500; // ms
     this.simAlong = 0;
     this.simTimer = setInterval(() => {
-      // 依照目前路段的實際平均速度模擬前進
-      const fs = this.flatSteps[this.currentStepIndex];
-      const stepSpeed = fs && fs.step.duration > 0
-        ? fs.step.distance / fs.step.duration
-        : 12;
-      const v = Math.max(3, Math.min(stepSpeed, 33));
+      // 優先以該路段的最高速限行駛；沒有速限資料時退回路段平均速度
+      let v = null;
+      if (this.maxspeeds && this.maxspeeds.length) {
+        const idx = Math.min(this.lowerBound(this.cumDist, this.simAlong), this.maxspeeds.length - 1);
+        const ms = this.maxspeeds[idx];
+        if (ms && ms.speed) {
+          const kmh = ms.unit === 'mph' ? ms.speed * 1.609 : ms.speed;
+          v = kmh / 3.6;
+        }
+      }
+      if (v === null) {
+        const fs = this.flatSteps[this.currentStepIndex];
+        v = fs && fs.step.duration > 0 ? fs.step.distance / fs.step.duration : 12;
+      }
+      v = Math.max(3, Math.min(v, 34)); // 上限約 120 km/h
       this.simAlong = Math.min(this.simAlong + v * (TICK / 1000), this.total);
       const pt = this.pointAt(this.simAlong);
       const brg = this.bearingAt(this.simAlong);
