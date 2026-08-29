@@ -1,5 +1,6 @@
 // ============ 路線規劃（Mapbox Directions API）與路線繪製 ============
 import { getToken, config } from './config.js';
+import { s2tw } from './utils.js';
 
 /**
  * 向 Mapbox Directions API 要求路線。
@@ -19,7 +20,9 @@ export async function fetchRoutes(waypoints, profile, { bearing = null } = {}) {
     banner_instructions: 'true',
     voice_instructions: 'true',
     voice_units: 'metric',
-    language: config.language,
+    // Directions API 不支援 zh-Hant（會退回簡體），所以明確要 zh-Hans
+    // 再由 s2tw() 轉成繁體
+    language: 'zh-Hans',
   });
   // 替代路線只支援兩個點（無中途停靠）的情況
   if (waypoints.length === 2) params.set('alternatives', 'true');
@@ -41,7 +44,23 @@ export async function fetchRoutes(waypoints, profile, { bearing = null } = {}) {
     };
     throw new Error(messages[data.code] || data.message || `路線規劃失敗（${data.code}）`);
   }
+  for (const route of data.routes) localizeRoute(route);
   return data.routes;
+}
+
+/** 把 API 回傳的簡體指示文字（畫面與語音）轉成繁體 */
+function localizeRoute(route) {
+  for (const leg of route.legs || []) {
+    for (const step of leg.steps || []) {
+      if (step.maneuver && step.maneuver.instruction) {
+        step.maneuver.instruction = s2tw(step.maneuver.instruction);
+      }
+      for (const vi of step.voiceInstructions || []) {
+        vi.announcement = s2tw(vi.announcement);
+      }
+      if (step.name) step.name = s2tw(step.name);
+    }
+  }
 }
 
 // ============ 路線圖層繪製 ============
