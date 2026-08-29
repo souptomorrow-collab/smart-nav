@@ -10,12 +10,45 @@ export function setProximity(lngLat) {
 
 /**
  * 正向地理編碼（搜尋）。回傳 [{ name, address, lngLat }]
+ * 主要走 Search Box API（地標 / 店家 / 學校等 POI 資料較完整），
+ * 查不到或失敗時退回舊版 Geocoding API（純地址較強）。
  */
 export async function geocode(query, { limit = 6, signal } = {}) {
   const coords = parseCoords(query);
   if (coords) {
     return [{ name: fmtCoords(coords), address: '座標位置', lngLat: coords }];
   }
+  try {
+    const results = await searchBoxForward(query, { limit, signal });
+    if (results.length) return results;
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    // Search Box 失敗時繼續嘗試舊版 API
+  }
+  return legacyGeocode(query, { limit, signal });
+}
+
+/** Mapbox Search Box API：POI 涵蓋佳，支援中文地標名稱 */
+async function searchBoxForward(query, { limit, signal }) {
+  const params = new URLSearchParams({
+    q: query,
+    access_token: getToken(),
+    language: config.language,
+    limit: String(limit),
+  });
+  if (proximity) params.set('proximity', proximity.join(','));
+  const res = await fetch(`https://api.mapbox.com/search/searchbox/v1/forward?${params}`, { signal });
+  if (!res.ok) throw new Error(`搜尋失敗（${res.status}）`);
+  const data = await res.json();
+  return (data.features || []).map((f) => ({
+    name: f.properties.name || f.properties.full_address || '',
+    address: f.properties.full_address || f.properties.place_formatted || '',
+    lngLat: f.geometry.coordinates,
+  }));
+}
+
+/** 舊版 Geocoding API：當 Search Box 沒有結果時的地址備援 */
+async function legacyGeocode(query, { limit, signal }) {
   const params = new URLSearchParams({
     access_token: getToken(),
     language: config.language,
