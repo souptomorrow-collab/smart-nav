@@ -9,9 +9,13 @@ function pickVoice() {
   const voices = speechSynthesis.getVoices();
   if (!voices.length) return;
   voicesLoaded = true;
-  // 優先挑選台灣中文語音，其次任何中文語音
+  // 優先挑 Google 的台灣中文語音（俗稱「Google 小姐」，Chrome 內建），
+  // 沒有的話依序退回其他台灣中文 / 任何中文語音
+  const isZhTW = (v) => v.lang === 'zh-TW' || v.lang === 'zh_TW';
   voice =
-    voices.find((v) => v.lang === 'zh-TW') ||
+    voices.find((v) => isZhTW(v) && v.name.includes('Google')) ||
+    voices.find((v) => v.lang.startsWith('zh') && v.name.includes('Google')) ||
+    voices.find(isZhTW) ||
     voices.find((v) => v.lang.startsWith('zh')) ||
     null;
 }

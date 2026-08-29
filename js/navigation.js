@@ -27,6 +27,60 @@ export function maneuverIconSVG(type, modifier, color = '#fff') {
   return `<svg viewBox="0 0 48 48"><g transform="rotate(${angle} 24 24)"><path fill="${color}" d="M24 5l11 15h-8v23h-6V20h-8z"/></g></svg>`;
 }
 
+/** 單一車道的箭頭圖示 */
+export function laneIconSVG(direction, active) {
+  const color = active ? '#ffffff' : 'rgba(255,255,255,.32)';
+  const angle = MOD_ANGLES[direction] ?? 0;
+  if (direction === 'uturn') {
+    return `<svg viewBox="0 0 48 48"><path fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round" d="M18 42V21a8 8 0 0 1 16 0v6"/><path fill="${color}" d="M34 38l-7-10h14z"/></svg>`;
+  }
+  return `<svg viewBox="0 0 48 48"><g transform="rotate(${angle} 24 24)"><path fill="${color}" d="M24 6l10 14h-7v22h-6V20h-7z"/></g></svg>`;
+}
+
+/**
+ * 依可走車道位置合成中文語音提示；沒有需要提示的情況回傳 null
+ * lanes: [{ active, direction }]，由左至右
+ */
+function laneHint(lanes) {
+  const n = lanes.length;
+  const act = lanes.map((l, i) => (l.active ? i : -1)).filter((i) => i >= 0);
+  if (!act.length || act.length === n) return null; // 全部可走就不用提醒
+  const leftMost = act[0];
+  const rightMost = act[act.length - 1];
+  const k = act.length;
+  if (rightMost < n / 2) {
+    if (k === 1) return leftMost === 0 ? '請靠左，走最左側車道' : `請走左邊第 ${leftMost + 1} 車道`;
+    return `請靠左行駛，左側 ${k} 條車道皆可`;
+  }
+  if (leftMost >= n / 2) {
+    if (k === 1) return rightMost === n - 1 ? '請靠右，走最右側車道' : `請走右邊第 ${n - rightMost} 車道`;
+    return `請靠右行駛，右側 ${k} 條車道皆可`;
+  }
+  return '請走中間車道';
+}
+
+// ---- 測速照相資料 ----
+let CAMERAS = null;
+
+/** 載入內建的全台固定式測速照相資料（警政署開放資料） */
+export async function loadSpeedCameras() {
+  if (CAMERAS) return CAMERAS;
+  try {
+    const res = await fetch('data/speed-cameras.json');
+    CAMERAS = await res.json();
+  } catch {
+    CAMERAS = [];
+  }
+  return CAMERAS;
+}
+
+function bearingToChar(brg) {
+  if (brg >= 315 || brg < 45) return '北';
+  if (brg < 135) return '東';
+  if (brg < 225) return '南';
+  return '西';
+}
+
 // ---- 自車圖標 ----
 function createPuckElement() {
   const el = document.createElement('div');
@@ -57,7 +111,8 @@ export class Navigator {
   }
 
   /** 開始導航。waypoints 為完整的 [起點, ...停靠點, 終點] */
-  start(route, { profile, waypoints, simulate = false }) {
+  async start(route, { profile, waypoints, simulate = false }) {
+    await loadSpeedCameras();
     this.stopTracking();
     this.active = true;
     this.simulate = simulate;
@@ -111,9 +166,37 @@ export class Navigator {
       }
     }
     this.spoken = new Set();
+    this.laneSpoken = new Set();
     this.currentStepIndex = 0;
     this.offRouteCounter = 0;
     this.simAlong = 0;
+    this.computeRouteCameras();
+  }
+
+  /** 找出路線沿途的測速照相桿（含拍攝方向比對，反向的不列入） */
+  computeRouteCameras() {
+    this.routeCameras = [];
+    this.camSpoken = new Set();
+    if (!CAMERAS || !CAMERAS.length) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of this.navCoords) {
+      if (c[0] < minX) minX = c[0];
+      if (c[0] > maxX) maxX = c[0];
+      if (c[1] < minY) minY = c[1];
+      if (c[1] > maxY) maxY = c[1];
+    }
+    const pad = 0.001; // 約 100 公尺
+    for (const cam of CAMERAS) {
+      const [lng, lat, limit, direct] = cam;
+      if (lng < minX - pad || lng > maxX + pad || lat < minY - pad || lat > maxY + pad) continue;
+      const snap = snapToLine([lng, lat], this.navCoords, this.cumDist);
+      if (snap.dist > 50) continue;
+      const dirChar = bearingToChar(this.bearingAt(snap.along));
+      const dirChars = ['東', '西', '南', '北'].filter((ch) => direct.includes(ch));
+      if (dirChars.length && !dirChars.includes(dirChar)) continue;
+      this.routeCameras.push({ along: snap.along, lngLat: [lng, lat], limit });
+    }
+    this.routeCameras.sort((a, b) => a.along - b.along);
   }
 
   // ---- GPS 追蹤 ----
@@ -226,6 +309,31 @@ export class Navigator {
       }
     }
 
+    // 車道指引：從 banner 指示的 sub 區塊取出車道資訊（由左至右）
+    let lanes = null;
+    const banners = cur.step.bannerInstructions || [];
+    let activeBanner = null;
+    for (const b of banners) {
+      if (distToManeuver <= b.distanceAlongGeometry + 1) {
+        if (!activeBanner || b.distanceAlongGeometry < activeBanner.distanceAlongGeometry) activeBanner = b;
+      }
+    }
+    if (activeBanner && activeBanner.sub && activeBanner.sub.components) {
+      const laneComps = activeBanner.sub.components.filter((c) => c.type === 'lane');
+      if (laneComps.length) {
+        lanes = laneComps.map((c) => ({
+          active: !!c.active,
+          direction: (c.active && c.active_direction) || (c.directions && c.directions[0]) || 'straight',
+        }));
+      }
+    }
+    // 車道語音提示：每個路口只說一次
+    if (lanes && !this.laneSpoken.has(csi) && distToManeuver > 40) {
+      const hint = laneHint(lanes);
+      this.laneSpoken.add(csi);
+      if (hint) speak(hint, { interrupt: false });
+    }
+
     // 剩餘距離 / 時間
     const remainingDist = Math.max(0, this.total - along);
     let remainingDur = 0;
@@ -243,12 +351,37 @@ export class Navigator {
       }
     }
 
+    // 測速照相提醒
+    let camera = null;
+    const speedKmh = Math.round(Math.max(0, speedMs) * 3.6);
+    if (this.routeCameras && this.routeCameras.length) {
+      for (let i = 0; i < this.routeCameras.length; i++) {
+        const c = this.routeCameras[i];
+        if (c.along > along - 20) {
+          const d = Math.max(0, c.along - along);
+          if (d <= 800) {
+            camera = { dist: d, limit: c.limit };
+            if (!this.camSpoken.has(i) && d <= 500) {
+              this.camSpoken.add(i);
+              const dTxt = d >= 100 ? `${Math.round(d / 50) * 50} 公尺` : '';
+              speak(`前方${dTxt ? ' ' + dTxt : ''}測速照相${c.limit ? `，速限 ${c.limit}` : ''}`, { interrupt: false });
+            }
+            if (c.limit && speedKmh > c.limit && d <= 600 && !this.camSpoken.has('os' + i)) {
+              this.camSpoken.add('os' + i);
+              speak(`注意，您已超速，速限 ${c.limit}`, { interrupt: false });
+            }
+          }
+          break;
+        }
+      }
+    }
+
     // 相機跟隨
     if (this.following) {
       const now = Date.now();
       if (now - this.lastCamera > 700) {
         this.lastCamera = now;
-        const zoom = speedMs > 22 ? 15 : speedMs > 12 ? 16 : 16.8;
+        const zoom = speedMs > 22 ? 16.2 : speedMs > 12 ? 17.2 : 18;
         this.map.easeTo({
           center: displayPos,
           bearing: brg,
@@ -272,6 +405,8 @@ export class Navigator {
     const upcoming = next ? next.step.maneuver : cur.step.maneuver;
     this.cb.onUpdate({
       distToManeuver,
+      lanes,
+      camera,
       instruction: upcoming.instruction,
       iconSVG: maneuverIconSVG(upcoming.type, upcoming.modifier),
       nextInstruction:
@@ -280,7 +415,7 @@ export class Navigator {
           : null,
       remainingDist,
       remainingDur,
-      speedKmh: Math.round(Math.max(0, speedMs) * 3.6),
+      speedKmh,
       speedLimit,
     });
   }

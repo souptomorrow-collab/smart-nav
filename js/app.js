@@ -7,7 +7,7 @@ import {
 import { createMap, toggleStyle, toggleNight, toggleTraffic, toggle3D, mapState } from './map.js';
 import { geocode, reverseGeocode, attachAutocomplete, setProximity } from './search.js';
 import { fetchRoutes, drawRoutes, clearRoutes, fitToRoute, ensureRouteLayers } from './routing.js';
-import { Navigator, maneuverIconSVG } from './navigation.js';
+import { Navigator, maneuverIconSVG, laneIconSVG, loadSpeedCameras } from './navigation.js';
 import { speak, setMuted, isMuted } from './voice.js';
 import * as places from './places.js';
 
@@ -84,6 +84,7 @@ async function init() {
   setupMapTools();
   setupNavHUD();
   registerSW();
+  loadSpeedCameras(); // 預載全台測速照相資料
 }
 
 // ============ 搜尋 ============
@@ -407,6 +408,7 @@ function startNavigation(simulate) {
       routeState.routes = [newRoute];
       routeState.selectedIndex = 0;
       drawRoutes(map, [newRoute], 0);
+      showRouteCameras();
       toast('已重新規劃路線');
     },
     onError: (msg) => toast(msg, 4000),
@@ -419,19 +421,95 @@ function startNavigation(simulate) {
     profile: routeState.profile,
     waypoints: routeState.waypoints,
     simulate,
-  });
+  }).then(() => showRouteCameras());
 
   map.on('dragstart', onNavDrag);
+}
+
+// ---- 路線上的測速照相圖示 ----
+function ensureCameraIcon() {
+  if (map.hasImage('cam-icon')) return;
+  const c = document.createElement('canvas');
+  c.width = c.height = 44;
+  const ctx = c.getContext('2d');
+  ctx.beginPath();
+  ctx.arc(22, 22, 20, 0, Math.PI * 2);
+  ctx.fillStyle = '#c62828';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#fff';
+  ctx.stroke();
+  ctx.font = '20px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('📷', 22, 23);
+  map.addImage('cam-icon', ctx.getImageData(0, 0, 44, 44));
+}
+
+function showRouteCameras() {
+  clearRouteCameras();
+  const cams = (navigator_ && navigator_.routeCameras) || [];
+  if (!cams.length) return;
+  try {
+    ensureCameraIcon();
+    map.addSource('nav-cameras', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: cams.map((c) => ({
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'Point', coordinates: c.lngLat },
+        })),
+      },
+    });
+    map.addLayer({
+      id: 'nav-cameras-layer',
+      type: 'symbol',
+      source: 'nav-cameras',
+      layout: { 'icon-image': 'cam-icon', 'icon-size': 0.9, 'icon-allow-overlap': true },
+    });
+  } catch { /* 樣式尚未就緒時忽略 */ }
+}
+
+function clearRouteCameras() {
+  if (map.getLayer('nav-cameras-layer')) map.removeLayer('nav-cameras-layer');
+  if (map.getSource('nav-cameras')) map.removeSource('nav-cameras');
 }
 
 function onNavDrag() {
   if (navigator_ && navigator_.active) navigator_.setFollowing(false);
 }
 
+let lastLanesKey = '';
+
 function updateNavHUD(s) {
   $('nav-distance').textContent = fmtDistance(s.distToManeuver);
   $('nav-instruction').textContent = s.instruction;
   $('nav-icon').innerHTML = s.iconSVG;
+  // 車道指引列
+  if (s.lanes && s.lanes.length) {
+    const key = s.lanes.map((l) => `${l.direction}${l.active ? 1 : 0}`).join(',');
+    if (key !== lastLanesKey) {
+      lastLanesKey = key;
+      $('nav-lanes').innerHTML = s.lanes
+        .map((l) => `<span class="lane${l.active ? ' active' : ''}">${laneIconSVG(l.direction, l.active)}</span>`)
+        .join('');
+    }
+    $('nav-lanes').hidden = false;
+  } else {
+    $('nav-lanes').hidden = true;
+    lastLanesKey = '';
+  }
+  // 測速照相警示
+  if (s.camera) {
+    $('nav-camera-text').textContent =
+      `測速照相 ${fmtDistance(s.camera.dist)}${s.camera.limit ? ` · 速限 ${s.camera.limit}` : ''}`;
+    $('nav-camera').classList.toggle('overspeed', !!(s.camera.limit && s.speedKmh > s.camera.limit));
+    $('nav-camera').hidden = false;
+  } else {
+    $('nav-camera').hidden = true;
+  }
   if (s.nextInstruction) {
     $('nav-next-text').textContent = s.nextInstruction;
     $('nav-next').hidden = false;
@@ -452,6 +530,7 @@ function updateNavHUD(s) {
 function exitNavigation() {
   if (navigator_) { navigator_.stop(); navigator_ = null; }
   navigating = false;
+  clearRouteCameras();
   map.off('dragstart', onNavDrag);
   $('nav-hud').hidden = true;
   $('topbar').hidden = false;

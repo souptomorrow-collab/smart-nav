@@ -116,14 +116,18 @@
 
     <!-- ============ 導航 HUD ============ -->
     <div id="nav-hud" hidden>
-      <div id="nav-banner">
-        <div id="nav-icon"></div>
-        <div id="nav-banner-text">
-          <div id="nav-distance">--</div>
-          <div id="nav-instruction">準備出發</div>
+      <div id="nav-top">
+        <div id="nav-banner">
+          <div id="nav-icon"></div>
+          <div id="nav-banner-text">
+            <div id="nav-distance">--</div>
+            <div id="nav-instruction">準備出發</div>
+          </div>
         </div>
+        <div id="nav-lanes" hidden></div>
+        <div id="nav-camera" hidden>📷 <span id="nav-camera-text"></span></div>
+        <div id="nav-next" hidden>接著 <span id="nav-next-text"></span></div>
       </div>
-      <div id="nav-next" hidden>接著 <span id="nav-next-text"></span></div>
       <button id="recenter-btn" hidden>📍 重新置中</button>
       <div id="nav-bottom">
         <div id="nav-speed">
