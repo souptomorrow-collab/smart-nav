@@ -47,8 +47,10 @@ export function laneIconSVG(direction, emphasis, palette = LANE_PALETTE) {
  * 依可走車道位置合成詳細中文語音提示；不需提示時回傳 null
  * lanes: [{ active, activeDirection, directions }]，由左至右
  * modifier: 下一個轉彎方向（配合提示「準備左轉」等）
+ * opts.freeway: 國道/快速道路用「內側/外側車道」；一般道路用「快車道/慢車道」
+ * opts.driving: 非開車模式不使用快慢車道用語
  */
-function laneHint(lanes, modifier) {
+function laneHint(lanes, modifier, { freeway = false, driving = true } = {}) {
   const n = lanes.length;
   const act = lanes.map((l, i) => (l.active ? i : -1)).filter((i) => i >= 0);
   if (!act.length || act.length === n) return null; // 全部可走就不用提醒
@@ -58,9 +60,21 @@ function laneHint(lanes, modifier) {
   const contiguous = R - L + 1 === k;
   let pos;
   if (contiguous && L === 0) {
-    pos = k === 1 ? '請走最左側車道' : `請走左側 ${k} 條車道`;
+    if (k === 1) {
+      pos = freeway ? '請走最內側車道' : driving ? '請切換到內側快車道' : '請走最左側車道';
+    } else {
+      pos = freeway ? `請走內側 ${k} 條車道`
+        : driving ? `請靠內側快車道行駛，左邊 ${k} 條皆可`
+        : `請走左側 ${k} 條車道`;
+    }
   } else if (contiguous && R === n - 1) {
-    pos = k === 1 ? '請走最右側車道' : `請走右側 ${k} 條車道`;
+    if (k === 1) {
+      pos = freeway ? '請走最外側車道' : driving ? '請切換到外側慢車道' : '請走最右側車道';
+    } else {
+      pos = freeway ? `請走外側 ${k} 條車道`
+        : driving ? `請靠外側慢車道行駛，右邊 ${k} 條皆可`
+        : `請走右側 ${k} 條車道`;
+    }
   } else if ((L + R) / 2 < (n - 1) / 2) {
     pos = `請走左邊第 ${act.map((i) => i + 1).join('、')} 車道`;
   } else {
@@ -439,10 +453,13 @@ export class Navigator {
     // 車道語音提示：每個路口只說一次
     if (lanes && !this.laneSpoken.has(csi) && distToManeuver > 40) {
       this.laneSpoken.add(csi);
-      const nextMod = this.flatSteps[csi + 1]
-        ? this.flatSteps[csi + 1].step.maneuver.modifier
-        : cur.step.maneuver.modifier;
-      const hint = laneHint(lanes, nextMod);
+      const nextFs = this.flatSteps[csi + 1];
+      const nextMod = nextFs ? nextFs.step.maneuver.modifier : cur.step.maneuver.modifier;
+      const roadName = `${cur.step.name || ''} ${(nextFs && nextFs.step.name) || ''}`;
+      const hint = laneHint(lanes, nextMod, {
+        freeway: /國道|高速公路|快速道路|高架|快速公路/.test(roadName),
+        driving: this.profile.startsWith('driving'),
+      });
       if (hint) speak(hint, { interrupt: false });
     }
 
