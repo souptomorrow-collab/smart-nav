@@ -100,12 +100,28 @@ function bearingToChar(brg) {
   return '西';
 }
 
-// ---- 下一個轉彎點標記 ----
-function createTurnMarkerElement() {
-  const el = document.createElement('div');
-  el.className = 'turn-marker';
-  return el;
+// ---- 下一個轉彎的路面箭頭（Google Maps 式：沿路線幾何繪製） ----
+function ensureArrowheadImage(map) {
+  if (map.hasImage('turn-arrowhead')) return;
+  const c = document.createElement('canvas');
+  c.width = c.height = 36;
+  const ctx = c.getContext('2d');
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(18, 3);
+  ctx.lineTo(33, 31);
+  ctx.lineTo(18, 23);
+  ctx.lineTo(3, 31);
+  ctx.closePath();
+  ctx.strokeStyle = '#0b4aa2';
+  ctx.lineWidth = 4;
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  map.addImage('turn-arrowhead', ctx.getImageData(0, 0, 36, 36));
 }
+
+const EMPTY_FC = { type: 'FeatureCollection', features: [] };
 
 // ---- 自車圖標 ----
 function createPuckElement() {
@@ -154,12 +170,8 @@ export class Navigator {
         pitchAlignment: 'map',
       }).setLngLat(this.navCoords[0]).addTo(this.map);
     }
-    if (!this.turnMarker) {
-      this.turnMarker = new mapboxgl.Marker({ element: createTurnMarkerElement() })
-        .setLngLat(this.navCoords[0]).addTo(this.map);
-    }
     this.lastTurnIdx = -1;
-    this.updateTurnMarker();
+    this.updateTurnArrow();
 
     speak('開始導航。' + (this.flatSteps[0]?.step.maneuver.instruction || ''));
 
@@ -389,7 +401,7 @@ export class Navigator {
     let csi = this.currentStepIndex;
     while (csi < this.flatSteps.length - 1 && along >= this.flatSteps[csi].endDist) csi++;
     this.currentStepIndex = csi;
-    this.updateTurnMarker();
+    this.updateTurnArrow();
     const cur = this.flatSteps[csi];
     const next = this.flatSteps[csi + 1] || null;
     const distToManeuver = Math.max(0, cur.endDist - along);
@@ -550,21 +562,89 @@ export class Navigator {
     });
   }
 
-  /** 把大箭頭標記移到下一個轉彎點（跨步時才更新） */
-  updateTurnMarker() {
-    if (!this.turnMarker) return;
+  /** 建立路面箭頭圖層（樣式切換後會自動重建） */
+  ensureTurnArrowLayers() {
+    if (this.map.getSource('turn-arrow')) return false;
+    ensureArrowheadImage(this.map);
+    this.map.addSource('turn-arrow', { type: 'geojson', data: EMPTY_FC });
+    this.map.addSource('turn-arrow-head', { type: 'geojson', data: EMPTY_FC });
+    const slot = { slot: 'middle' };
+    this.map.addLayer({
+      id: 'turn-arrow-casing', type: 'line', source: 'turn-arrow', ...slot,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#0b4aa2', 'line-width': 12 },
+    });
+    this.map.addLayer({
+      id: 'turn-arrow-line', type: 'line', source: 'turn-arrow', ...slot,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': 7.5 },
+    });
+    this.map.addLayer({
+      id: 'turn-arrow-head-layer', type: 'symbol', source: 'turn-arrow-head', ...slot,
+      layout: {
+        'icon-image': 'turn-arrowhead',
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.55, 17, 0.9],
+        'icon-rotate': ['get', 'bearing'],
+        'icon-rotation-alignment': 'map',
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+      },
+    });
+    return true;
+  }
+
+  /** 沿路線幾何畫出下一個轉彎的路面箭頭（跨步時才更新） */
+  updateTurnArrow() {
+    if (!this.active) return;
+    let rebuilt = false;
+    try {
+      rebuilt = this.ensureTurnArrowLayers();
+    } catch { return; /* 樣式尚未載入完成 */ }
     const csi = this.currentStepIndex;
-    if (this.lastTurnIdx === csi) return;
+    if (!rebuilt && this.lastTurnIdx === csi) return;
     this.lastTurnIdx = csi;
-    const el = this.turnMarker.getElement();
+
     const nx = this.flatSteps[csi + 1];
-    if (nx) {
-      const m = nx.step.maneuver;
-      el.innerHTML = maneuverIconSVG(m.type, m.modifier, '#0f5132');
-      el.style.display = '';
-      this.turnMarker.setLngLat(m.location || this.navCoords[nx.startIdx]);
-    } else {
-      el.style.display = 'none';
+    if (!nx || nx.step.maneuver.type === 'arrive') {
+      this.map.getSource('turn-arrow').setData(EMPTY_FC);
+      this.map.getSource('turn-arrow-head').setData(EMPTY_FC);
+      return;
+    }
+    // 取轉彎點前 55 公尺、後 35 公尺的路線幾何
+    const mDist = this.cumDist[nx.startIdx];
+    const startD = Math.max(0, mDist - 55);
+    const endD = Math.min(this.total, mDist + 35);
+    const coords = [this.pointAt(startD)];
+    const iStart = this.lowerBound(this.cumDist, startD) + 1;
+    const iEnd = this.lowerBound(this.cumDist, endD);
+    for (let i = iStart; i <= iEnd; i++) coords.push(this.navCoords[i]);
+    coords.push(this.pointAt(endD));
+    // 去除重複點
+    const line = coords.filter((c, i) => i === 0 || distance(c, coords[i - 1]) > 0.5);
+    if (line.length < 2) return;
+    const head = line[line.length - 1];
+    const headBearing = bearing(line[line.length - 2], head);
+
+    this.map.getSource('turn-arrow').setData({
+      type: 'FeatureCollection',
+      features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } }],
+    });
+    this.map.getSource('turn-arrow-head').setData({
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        properties: { bearing: headBearing },
+        geometry: { type: 'Point', coordinates: head },
+      }],
+    });
+  }
+
+  clearTurnArrow() {
+    for (const id of ['turn-arrow-head-layer', 'turn-arrow-line', 'turn-arrow-casing']) {
+      if (this.map.getLayer(id)) this.map.removeLayer(id);
+    }
+    for (const id of ['turn-arrow', 'turn-arrow-head']) {
+      if (this.map.getSource(id)) this.map.removeSource(id);
     }
   }
 
@@ -633,10 +713,7 @@ export class Navigator {
       this.puck.remove();
       this.puck = null;
     }
-    if (this.turnMarker) {
-      this.turnMarker.remove();
-      this.turnMarker = null;
-    }
+    this.clearTurnArrow();
     if ('speechSynthesis' in window) speechSynthesis.cancel();
   }
 }

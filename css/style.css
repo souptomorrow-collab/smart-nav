@@ -264,14 +264,6 @@ input { font-family: inherit; }
   width: 44px; height: 44px; pointer-events: none;
 }
 
-/* 下一個轉彎點標記 */
-.turn-marker {
-  width: 40px; height: 40px; background: #fff; border-radius: 50%;
-  box-shadow: 0 2px 8px rgba(0,0,0,.4); pointer-events: none;
-  display: flex; align-items: center; justify-content: center;
-}
-.turn-marker svg { width: 28px; height: 28px; }
-
 /* 路線步驟清單中的車道圖 */
 .step-lanes {
   display: flex; align-items: center; gap: 2px; margin-top: 4px;
