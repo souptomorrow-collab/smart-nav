@@ -527,7 +527,7 @@ export class Navigator {
           ? laneFs.step.destinations.replace(/[/,，;]+/g, '、')
           : '';
         const into = destName ? `進入${destName}` : destSigns ? `往${destSigns}` : '';
-        const t = {
+        let t = {
           right: isFreeway ? `請靠外側車道，準備右轉${into}` : `前方右轉${into}，請先切換到外側慢車道`,
           'sharp right': isFreeway ? `請靠外側車道，準備右轉${into}` : `前方右轉${into}，請先切換到外側慢車道`,
           left: isFreeway ? `請靠內側車道，準備左轉${into}` : `前方左轉${into}，請先切換到內側快車道`,
@@ -536,6 +536,15 @@ export class Navigator {
           'slight right': `前方靠右${into}，請靠右側車道行駛`,
           'slight left': `前方靠左${into}，請靠左側車道行駛`,
         }[laneMod];
+        // 轉入後該走哪一側（依下下個轉彎前瞻）
+        if (t && ['right', 'sharp right', 'left', 'sharp left'].includes(laneMod)) {
+          const dli = this.destLaneInfo(csi);
+          if (dli) {
+            const laneWord = isFreeway ? `${dli.side}車道`
+              : dli.side === '內側' ? '內側快車道' : '外側慢車道';
+            t += `，轉入後請走${laneWord}${dli.why ? `，${dli.why}` : ''}`;
+          }
+        }
         if (t) speak(t, { interrupt: false });
       }
     }
@@ -623,7 +632,7 @@ export class Navigator {
           this._jv = this.buildJunctionView(csi);
           if (this._jv) {
             // 路口圖上的快慢車道文字提示
-            this._jv.hint = {
+            let hint = {
               right: isFreeway ? '靠外側車道右轉' : '靠外側慢車道右轉',
               'sharp right': isFreeway ? '靠外側車道右轉' : '靠外側慢車道右轉',
               left: isFreeway ? '靠內側車道左轉' : '靠內側快車道左轉',
@@ -632,6 +641,9 @@ export class Navigator {
               'slight right': '靠右行駛',
               'slight left': '靠左行駛',
             }[nm.modifier] || null;
+            const dli = this.destLaneInfo(csi);
+            if (hint && dli && dli.why) hint += ` → 轉入走${dli.side}`;
+            this._jv.hint = hint;
           }
         }
         junction = this._jv;
@@ -846,6 +858,29 @@ export class Navigator {
     for (const id of ['turn-arrow', 'turn-arrow-head']) {
       if (this.map.getSource(id)) this.map.removeSource(id);
     }
+  }
+
+  /**
+   * 判斷轉入下一條路後該走內側還是外側：
+   * 依「下下個轉彎」的方向前瞻（700 公尺內），沒有前瞻資訊時
+   * 依台灣法規慣例（右轉進外側、左轉進內側）。
+   * 回傳 { side: '內側'|'外側', why: string|null } 或 null
+   */
+  destLaneInfo(csi) {
+    const nxt = this.flatSteps[csi + 1];
+    if (!nxt) return null;
+    const leftish = ['left', 'sharp left', 'slight left', 'uturn'];
+    const rightish = ['right', 'sharp right', 'slight right'];
+    const after = this.flatSteps[csi + 2];
+    if (after && nxt.step.distance < 700) {
+      const am = after.step.maneuver.modifier;
+      if (leftish.includes(am)) return { side: '內側', why: '準備左轉' };
+      if (rightish.includes(am)) return { side: '外側', why: '準備右轉' };
+    }
+    const cm = nxt.step.maneuver.modifier;
+    if (leftish.includes(cm)) return { side: '內側', why: null };
+    if (rightish.includes(cm)) return { side: '外側', why: null };
+    return null;
   }
 
   async reroute(currentPos, heading) {
