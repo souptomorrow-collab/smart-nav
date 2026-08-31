@@ -521,14 +521,20 @@ export class Navigator {
         if (hint) speak(hint, { interrupt: false });
       } else if (this.profile.startsWith('driving') && distToManeuver <= 320) {
         this.laneSpoken.add(csi);
+        // 要轉進的路名（匝道沒有路名時改唸方向指標，例如「往大甲、南投」）
+        const destName = (laneFs && laneFs.step.name) || '';
+        const destSigns = laneFs && laneFs.step.destinations
+          ? laneFs.step.destinations.replace(/[/,，;]+/g, '、')
+          : '';
+        const into = destName ? `進入${destName}` : destSigns ? `往${destSigns}` : '';
         const t = {
-          right: isFreeway ? '請靠外側車道，準備右轉' : '前方右轉，請先切換到外側慢車道',
-          'sharp right': isFreeway ? '請靠外側車道，準備右轉' : '前方右轉，請先切換到外側慢車道',
-          left: isFreeway ? '請靠內側車道，準備左轉' : '前方左轉，請先切換到內側快車道',
-          'sharp left': isFreeway ? '請靠內側車道，準備左轉' : '前方左轉，請先切換到內側快車道',
+          right: isFreeway ? `請靠外側車道，準備右轉${into}` : `前方右轉${into}，請先切換到外側慢車道`,
+          'sharp right': isFreeway ? `請靠外側車道，準備右轉${into}` : `前方右轉${into}，請先切換到外側慢車道`,
+          left: isFreeway ? `請靠內側車道，準備左轉${into}` : `前方左轉${into}，請先切換到內側快車道`,
+          'sharp left': isFreeway ? `請靠內側車道，準備左轉${into}` : `前方左轉${into}，請先切換到內側快車道`,
           uturn: '前方迴轉，請先切換到內側快車道',
-          'slight right': '前方靠右，請靠右側車道行駛',
-          'slight left': '前方靠左，請靠左側車道行駛',
+          'slight right': `前方靠右${into}，請靠右側車道行駛`,
+          'slight left': `前方靠左${into}，請靠左側車道行駛`,
         }[laneMod];
         if (t) speak(t, { interrupt: false });
       }
