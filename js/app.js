@@ -176,8 +176,10 @@ function clearRouteState() {
   routeState.waypoints = null;
   clearRoutes(map);
   clearRouteCameras();
+  clearPreviewMarker();
   stopMarkers.forEach((m) => m.remove());
   stopMarkers = [];
+  map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
   $('route-alternatives').innerHTML = '';
   $('route-actions').hidden = true;
 }
@@ -357,13 +359,44 @@ function renderRouteCards() {
   wrap.querySelectorAll('.route-card').forEach((card) => {
     card.addEventListener('click', () => selectRoute(Number(card.dataset.i)));
   });
+  wrap.querySelectorAll('.step-item').forEach((btn) => {
+    btn.addEventListener('click', () => previewStep(stepsPreviewList[Number(btn.dataset.si)]));
+  });
 }
 
 const STEP_LANE_PALETTE = { on: '#1a73e8', mid: '#8ab4f8', off: '#c9ced6' };
+let stepsPreviewList = [];
+let previewMarker = null;
+
+/** 點擊步驟 → 飛到該路口，以行進方向視角預覽 */
+function previewStep(step) {
+  if (!step || !step.maneuver || !step.maneuver.location) return;
+  const loc = step.maneuver.location;
+  const brg = step.maneuver.bearing_before ?? step.maneuver.bearing_after ?? 0;
+  if (previewMarker) previewMarker.remove();
+  previewMarker = new mapboxgl.Marker({ color: '#7b1fa2', scale: 0.9 })
+    .setLngLat(loc)
+    .addTo(map);
+  map.flyTo({
+    center: loc,
+    zoom: 17.5,
+    pitch: 55,
+    bearing: brg,
+    duration: 1000,
+    padding: window.innerWidth <= 640
+      ? { top: 0, bottom: Math.round(window.innerHeight * 0.45), left: 0, right: 0 }
+      : { top: 0, bottom: 0, left: 340, right: 0 },
+  });
+}
+
+function clearPreviewMarker() {
+  if (previewMarker) { previewMarker.remove(); previewMarker = null; }
+}
 
 function renderStepsList(route) {
   const steps = [];
   for (const leg of route.legs) for (const s of leg.steps) steps.push(s);
+  stepsPreviewList = steps;
   const items = steps.map((s, i) => {
     // 這一步的轉彎車道資訊掛在「上一步」的 banner sub 區塊
     let laneHtml = '';
@@ -385,14 +418,15 @@ function renderStepsList(route) {
       }
     }
     return `
-    <div class="drawer-item">
+    <button class="drawer-item step-item" data-si="${i}" title="點擊預覽此路口">
       <span style="width:22px;height:22px;flex-shrink:0">${maneuverIconSVG(s.maneuver.type, s.maneuver.modifier, '#5f6368')}</span>
       <div class="drawer-item-main">
         <div class="di-name">${escapeHtml(s.maneuver.instruction)}</div>
         ${s.distance > 0 ? `<div class="di-context">${fmtDistance(s.distance)}</div>` : ''}
         ${laneHtml}
       </div>
-    </div>`;
+      <span class="step-go">👁</span>
+    </button>`;
   }).join('');
   return `<details><summary class="text-btn" style="cursor:pointer;padding:6px 0">📋 檢視路線步驟（${steps.length} 步）</summary>${items}</details>`;
 }
@@ -436,6 +470,7 @@ function startNavigation(simulate) {
 
   hidePanels();
   closeRoutePanel({ keepRoute: true });
+  clearPreviewMarker();
   document.body.classList.add('navigating');
   $('topbar').hidden = true;
   $('map-tools').hidden = true;
