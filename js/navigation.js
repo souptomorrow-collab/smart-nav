@@ -796,9 +796,9 @@ export class Navigator {
     if (!nx) return null;
     const mIdx = nx.startIdx;
     const mDist = this.cumDist[mIdx];
-    const SCALE = 1.5;           // 每公尺像素
-    const CX = 150, CY = 175;    // 轉彎點在畫布上的位置
-    const BEFORE = 85, AFTER = 60, STUB = 45;
+    const SCALE = 2.4;           // 每公尺像素（放大，轉向角度才明顯）
+    const CX = 150, CY = 195;    // 轉彎點在畫布上的位置（偏下，出口方向為主角）
+    const BEFORE = 45, AFTER = 55, STUB = 30;
 
     const m = this.navCoords[mIdx];
     const cosLat = Math.cos((m[1] * Math.PI) / 180);
@@ -823,23 +823,42 @@ export class Navigator {
     const route = simplifyPath(pts.map(toCanvas), 4);
     if (route.length < 2) return null;
 
-    // 用路線資料中的真實路口（intersections）畫出所有道路臂：
-    // 包括轉彎前會經過的小路，避免提早轉錯
+    // 只畫「會影響判斷」的道路臂，避免整團灰色雜訊：
+    // 1) 轉彎路口本身的所有臂  2) 轉彎前的平行路（第 N 條路口的來源）
     const roads = [];
+    const exitBrg = this.bearingAt(Math.min(this.total, mDist + 10));
+    const angDiff = (a, b) => {
+      let d = Math.abs(a - b) % 360;
+      return d > 180 ? 360 - d : d;
+    };
     const nodes = [];
     for (const fs of [this.flatSteps[csi], nx]) {
       if (fs && fs.step.intersections) nodes.push(...fs.step.intersections);
     }
+    let extraNodes = 0;
     for (const it of nodes) {
       if (!it.location || !it.bearings) continue;
       const snap = snapToLine(it.location, this.navCoords, this.cumDist);
-      if (snap.dist > 30) continue;
+      if (snap.dist > 25) continue;
       if (snap.along < mDist - BEFORE || snap.along > mDist + AFTER) continue;
       const isManeuver = Math.abs(snap.along - mDist) < 15;
-      const armLen = isManeuver ? STUB : 26;
       const nodePt = toCanvas(it.location);
-      for (const b of it.bearings) {
-        roads.push([nodePt, toCanvas(destination(it.location, armLen, b))]);
+      if (isManeuver) {
+        // 轉彎路口：畫出全部道路臂
+        for (const b of it.bearings) {
+          roads.push([nodePt, toCanvas(destination(it.location, STUB, b))]);
+        }
+      } else {
+        // 其他路口：只畫「與出口方向平行」的路（讓第 1 / 第 2 條看得出來）
+        const parallelArms = it.bearings.filter(
+          (b) => angDiff(b, exitBrg) < 50 || angDiff(b, (exitBrg + 180) % 360) < 50
+        );
+        if (parallelArms.length && extraNodes < 2) {
+          extraNodes++;
+          for (const b of parallelArms) {
+            roads.push([nodePt, toCanvas(destination(it.location, STUB, b))]);
+          }
+        }
       }
     }
     // 沒有路口資料時退回簡單畫法：直行延伸 + 轉入道路另一端
