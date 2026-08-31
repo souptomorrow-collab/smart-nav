@@ -912,6 +912,7 @@ export class Navigator {
     const nxt = this.flatSteps[csi + 1];
     if (!nxt) return 0;
     const mAlong = this.cumDist[nxt.startIdx];
+    if (!Number.isFinite(mAlong)) return 0;
     const exitBrg = this.bearingAt(Math.min(this.total, mAlong + 10));
     let count = 0;
     for (const it of this.flatSteps[csi].step.intersections || []) {
