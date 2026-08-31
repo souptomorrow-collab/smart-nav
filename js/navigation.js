@@ -923,11 +923,15 @@ export class Navigator {
       if (snap.dist > 25) continue;
       const rel = mAlong - snap.along;
       if (rel < 8 || rel > 70) continue;
-      const arm = it.bearings.find((b) => {
+      // 只算「真的能轉進去」的平行路：方向相近且 entry 為 true。
+      // 單行道逆向、分隔道路的對向車道（entry=false）不會被誤當成一條路。
+      let arm;
+      for (let i = 0; i < it.bearings.length; i++) {
+        const b = it.bearings[i];
         let d = Math.abs(b - exitBrg) % 360;
         if (d > 180) d = 360 - d;
-        return d < 35;
-      });
+        if (d < 35 && (!it.entry || it.entry[i] === true)) { arm = b; break; }
+      }
       if (arm !== undefined) out.push({ location: it.location, brg: arm, rel });
     }
     return out;
