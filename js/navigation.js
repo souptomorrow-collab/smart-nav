@@ -514,11 +514,14 @@ export class Navigator {
     if (!this.laneSpoken.has(csi) && distToManeuver > 40) {
       if (lanes) {
         this.laneSpoken.add(csi);
-        const hint = laneHint(lanes, laneMod, {
+        let hint = laneHint(lanes, laneMod, {
           freeway: isFreeway,
           driving: this.profile.startsWith('driving'),
         });
-        if (hint) speak(hint, { interrupt: false });
+        if (hint) {
+          hint += this.parallelClause(csi, laneMod);
+          speak(hint, { interrupt: false });
+        }
       } else if (this.profile.startsWith('driving') && distToManeuver <= 320) {
         this.laneSpoken.add(csi);
         // 要轉進的路名（匝道沒有路名時改唸方向指標，例如「往大甲、南投」）
@@ -544,6 +547,7 @@ export class Navigator {
               : dli.side === '內側' ? '內側快車道' : '外側慢車道';
             t += `，轉入後請走${laneWord}${dli.why ? `，${dli.why}` : ''}`;
           }
+          t += this.parallelClause(csi, laneMod);
         }
         if (t) speak(t, { interrupt: false });
       }
@@ -643,6 +647,8 @@ export class Navigator {
             }[nm.modifier] || null;
             const dli = this.destLaneInfo(csi);
             if (hint && dli && dli.why) hint += ` → 轉入走${dli.side}`;
+            const po = this.parallelRoadOrder(csi);
+            if (hint && po >= 1) hint = `⚠ 第${po + 1}條路口・${hint}`;
             this._jv.hint = hint;
           }
         }
@@ -881,6 +887,47 @@ export class Navigator {
     if (leftish.includes(cm)) return { side: '內側', why: null };
     if (rightish.includes(cm)) return { side: '外側', why: null };
     return null;
+  }
+
+  /** 平行路口的語音補充句：「，請越過第一條路口，在第二條右轉」 */
+  parallelClause(csi, mod) {
+    const turnWord = {
+      right: '右轉', 'sharp right': '右轉',
+      left: '左轉', 'sharp left': '左轉',
+    }[mod];
+    if (!turnWord) return '';
+    const order = this.parallelRoadOrder(csi);
+    if (order === 1) return `，請越過第一條路口，在第二條${turnWord}`;
+    if (order === 2) return `，前面兩條路口請先越過，在第三條${turnWord}`;
+    if (order > 2) return `，請在第${order + 1}條路口${turnWord}`;
+    return '';
+  }
+
+  /**
+   * 偵測轉彎點前方是否有平行的路口（例如分隔的雙向車道、帶狀公園兩側道路）。
+   * 回傳轉彎點之前 8~70 公尺內「與出口方向平行」的路口數：
+   * 0 = 遇到的第一條就是要轉的；1 = 要轉的是第二條；以此類推。
+   */
+  parallelRoadOrder(csi) {
+    const nxt = this.flatSteps[csi + 1];
+    if (!nxt) return 0;
+    const mAlong = this.cumDist[nxt.startIdx];
+    const exitBrg = this.bearingAt(Math.min(this.total, mAlong + 10));
+    let count = 0;
+    for (const it of this.flatSteps[csi].step.intersections || []) {
+      if (!it.location || !it.bearings) continue;
+      const snap = snapToLine(it.location, this.navCoords, this.cumDist);
+      if (snap.dist > 25) continue;
+      const rel = mAlong - snap.along;
+      if (rel < 8 || rel > 70) continue;
+      const hasParallel = it.bearings.some((b) => {
+        let d = Math.abs(b - exitBrg) % 360;
+        if (d > 180) d = 360 - d;
+        return d < 35;
+      });
+      if (hasParallel) count++;
+    }
+    return count;
   }
 
   async reroute(currentPos, heading) {
