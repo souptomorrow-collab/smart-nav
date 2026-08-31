@@ -115,7 +115,7 @@ function bearingToChar(brg) {
 }
 
 // ---- 下一個轉彎的路面箭頭（Google Maps 式：沿路線幾何繪製） ----
-function ensureArrowheadImage(map) {
+export function ensureArrowheadImage(map) {
   if (map.hasImage('turn-arrowhead')) return;
   const c = document.createElement('canvas');
   c.width = c.height = 36;

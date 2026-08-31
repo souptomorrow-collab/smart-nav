@@ -7,7 +7,8 @@ import {
 import { createMap, toggleStyle, toggleNight, toggleTraffic, toggle3D, mapState } from './map.js';
 import { geocode, reverseGeocode, attachAutocomplete, setProximity } from './search.js';
 import { fetchRoutes, drawRoutes, clearRoutes, fitToRoute, ensureRouteLayers } from './routing.js';
-import { Navigator, maneuverIconSVG, laneIconSVG, loadSpeedCameras } from './navigation.js';
+import { Navigator, maneuverIconSVG, laneIconSVG, loadSpeedCameras, ensureArrowheadImage } from './navigation.js';
+import { distance, bearing } from './utils.js';
 import { speak, setMuted, isMuted } from './voice.js';
 import * as places from './places.js';
 
@@ -360,7 +361,7 @@ function renderRouteCards() {
     card.addEventListener('click', () => selectRoute(Number(card.dataset.i)));
   });
   wrap.querySelectorAll('.step-item').forEach((btn) => {
-    btn.addEventListener('click', () => previewStep(stepsPreviewList[Number(btn.dataset.si)]));
+    btn.addEventListener('click', () => previewStep(Number(btn.dataset.si)));
   });
 }
 
@@ -368,8 +369,9 @@ const STEP_LANE_PALETTE = { on: '#1a73e8', mid: '#8ab4f8', off: '#c9ced6' };
 let stepsPreviewList = [];
 let previewMarker = null;
 
-/** 點擊步驟 → 飛到該路口，以行進方向視角預覽 */
-function previewStep(step) {
+/** 點擊步驟 → 飛到該路口，以行進方向視角預覽，並畫出轉彎路面箭頭 */
+function previewStep(stepIndex) {
+  const step = stepsPreviewList[stepIndex];
   if (!step || !step.maneuver || !step.maneuver.location) return;
   const loc = step.maneuver.location;
   const brg = step.maneuver.bearing_before ?? step.maneuver.bearing_after ?? 0;
@@ -377,6 +379,7 @@ function previewStep(step) {
   previewMarker = new mapboxgl.Marker({ color: '#7b1fa2', scale: 0.9 })
     .setLngLat(loc)
     .addTo(map);
+  drawPreviewArrow(stepIndex);
   map.flyTo({
     center: loc,
     zoom: 17.5,
@@ -389,8 +392,86 @@ function previewStep(step) {
   });
 }
 
+/** 預覽用的路面轉彎箭頭：轉彎點前 55 / 後 35 公尺的路線幾何 */
+function drawPreviewArrow(stepIndex) {
+  clearPreviewArrow();
+  const steps = stepsPreviewList;
+  const s = steps[stepIndex];
+  if (!s || stepIndex === 0 || !steps[stepIndex - 1].geometry) return;
+  const prev = steps[stepIndex - 1].geometry.coordinates;
+  const curc = s.geometry.coordinates;
+  if (!prev || !curc || prev.length < 2) return;
+  // 上一步的最後 55 公尺
+  const tail = [prev[prev.length - 1]];
+  let acc = 0;
+  for (let i = prev.length - 2; i >= 0 && acc < 55; i--) {
+    acc += distance(prev[i], prev[i + 1]);
+    tail.unshift(prev[i]);
+  }
+  // 這一步的前 35 公尺
+  const head = [curc[0]];
+  acc = 0;
+  for (let i = 1; i < curc.length && acc < 35; i++) {
+    acc += distance(curc[i - 1], curc[i]);
+    head.push(curc[i]);
+  }
+  const line = tail.concat(head.slice(1)).filter(
+    (c, i, arr) => i === 0 || distance(c, arr[i - 1]) > 0.5
+  );
+  if (line.length < 2) return;
+  const endPt = line[line.length - 1];
+  const headBrg = bearing(line[line.length - 2], endPt);
+  try {
+    ensureArrowheadImage(map);
+    map.addSource('preview-arrow', {
+      type: 'geojson',
+      data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } },
+    });
+    map.addSource('preview-arrow-head', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        properties: { bearing: headBrg },
+        geometry: { type: 'Point', coordinates: endPt },
+      },
+    });
+    const slot = { slot: 'middle' };
+    map.addLayer({
+      id: 'preview-arrow-casing', type: 'line', source: 'preview-arrow', ...slot,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#0b4aa2', 'line-width': 12 },
+    });
+    map.addLayer({
+      id: 'preview-arrow-line', type: 'line', source: 'preview-arrow', ...slot,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': 7.5 },
+    });
+    map.addLayer({
+      id: 'preview-arrow-head-layer', type: 'symbol', source: 'preview-arrow-head', ...slot,
+      layout: {
+        'icon-image': 'turn-arrowhead',
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.55, 17, 0.9],
+        'icon-rotate': ['get', 'bearing'],
+        'icon-rotation-alignment': 'map',
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+      },
+    });
+  } catch { /* 樣式尚未就緒時忽略 */ }
+}
+
+function clearPreviewArrow() {
+  for (const id of ['preview-arrow-head-layer', 'preview-arrow-line', 'preview-arrow-casing']) {
+    if (map.getLayer(id)) map.removeLayer(id);
+  }
+  for (const id of ['preview-arrow', 'preview-arrow-head']) {
+    if (map.getSource(id)) map.removeSource(id);
+  }
+}
+
 function clearPreviewMarker() {
   if (previewMarker) { previewMarker.remove(); previewMarker = null; }
+  clearPreviewArrow();
 }
 
 function renderStepsList(route) {
