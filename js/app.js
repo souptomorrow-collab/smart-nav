@@ -392,32 +392,44 @@ function previewStep(stepIndex) {
   });
 }
 
-/** 預覽用的路面轉彎箭頭：轉彎點前 55 / 後 35 公尺的路線幾何 */
+/** 預覽用的路面箭頭：轉彎步驟畫「前 55 / 後 35 公尺」，出發步驟畫起步直行箭頭 */
 function drawPreviewArrow(stepIndex) {
   clearPreviewArrow();
   const steps = stepsPreviewList;
   const s = steps[stepIndex];
-  if (!s || stepIndex === 0 || !steps[stepIndex - 1].geometry) return;
-  const prev = steps[stepIndex - 1].geometry.coordinates;
-  const curc = s.geometry.coordinates;
-  if (!prev || !curc || prev.length < 2) return;
-  // 上一步的最後 55 公尺
-  const tail = [prev[prev.length - 1]];
-  let acc = 0;
-  for (let i = prev.length - 2; i >= 0 && acc < 55; i--) {
-    acc += distance(prev[i], prev[i + 1]);
-    tail.unshift(prev[i]);
+  if (!s || !s.geometry) return;
+  let raw;
+  if (stepIndex === 0) {
+    // 出發步驟：起點往前 45 公尺的直行箭頭
+    const c0 = s.geometry.coordinates;
+    if (!c0 || c0.length < 2) return;
+    raw = [c0[0]];
+    let acc = 0;
+    for (let i = 1; i < c0.length && acc < 45; i++) {
+      acc += distance(c0[i - 1], c0[i]);
+      raw.push(c0[i]);
+    }
+  } else {
+    const prev = steps[stepIndex - 1].geometry && steps[stepIndex - 1].geometry.coordinates;
+    const curc = s.geometry.coordinates;
+    if (!prev || !curc || prev.length < 2) return;
+    // 上一步的最後 55 公尺
+    const tail = [prev[prev.length - 1]];
+    let acc = 0;
+    for (let i = prev.length - 2; i >= 0 && acc < 55; i--) {
+      acc += distance(prev[i], prev[i + 1]);
+      tail.unshift(prev[i]);
+    }
+    // 這一步的前 35 公尺（抵達步驟幾何極短也沒關係，箭頭停在目的地）
+    const head = [curc[0]];
+    acc = 0;
+    for (let i = 1; i < curc.length && acc < 35; i++) {
+      acc += distance(curc[i - 1], curc[i]);
+      head.push(curc[i]);
+    }
+    raw = tail.concat(head.slice(1));
   }
-  // 這一步的前 35 公尺
-  const head = [curc[0]];
-  acc = 0;
-  for (let i = 1; i < curc.length && acc < 35; i++) {
-    acc += distance(curc[i - 1], curc[i]);
-    head.push(curc[i]);
-  }
-  const line = tail.concat(head.slice(1)).filter(
-    (c, i, arr) => i === 0 || distance(c, arr[i - 1]) > 0.5
-  );
+  const line = raw.filter((c, i, arr) => i === 0 || distance(c, arr[i - 1]) > 0.5);
   if (line.length < 2) return;
   const endPt = line[line.length - 1];
   const headBrg = bearing(line[line.length - 2], endPt);
