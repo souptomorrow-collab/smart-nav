@@ -796,9 +796,13 @@ export class Navigator {
     if (!nx) return null;
     const mIdx = nx.startIdx;
     const mDist = this.cumDist[mIdx];
+    // 有平行路要越過時：拉長進入段並把轉彎點上移，讓「越過的路」全部入鏡
+    const priors = this.priorParallelNodes(csi);
     const SCALE = 2.4;           // 每公尺像素（放大，轉向角度才明顯）
-    const CX = 150, CY = 195;    // 轉彎點在畫布上的位置（偏下，出口方向為主角）
-    const BEFORE = 45, AFTER = 55, STUB = 30;
+    const CX = 150;
+    const CY = priors.length ? 110 : 195;
+    const BEFORE = priors.length ? 78 : 45;
+    const AFTER = 55, STUB = 30;
 
     const m = this.navCoords[mIdx];
     const cosLat = Math.cos((m[1] * Math.PI) / 180);
@@ -823,43 +827,22 @@ export class Navigator {
     const route = simplifyPath(pts.map(toCanvas), 4);
     if (route.length < 2) return null;
 
-    // 只畫「會影響判斷」的道路臂，避免整團灰色雜訊：
-    // 1) 轉彎路口本身的所有臂  2) 轉彎前的平行路（第 N 條路口的來源）
+    // 只畫「會影響判斷」的道路，避免灰色雜訊，且與語音的「第 N 條」完全一致：
+    // 1) 轉彎路口本身的所有道路臂
+    // 2) 轉彎前要越過的平行路（priorParallelNodes），畫成貫穿的完整橫線
     const roads = [];
-    const exitBrg = this.bearingAt(Math.min(this.total, mDist + 10));
-    const angDiff = (a, b) => {
-      let d = Math.abs(a - b) % 360;
-      return d > 180 ? 360 - d : d;
-    };
-    const nodes = [];
-    for (const fs of [this.flatSteps[csi], nx]) {
-      if (fs && fs.step.intersections) nodes.push(...fs.step.intersections);
-    }
-    let extraNodes = 0;
-    for (const it of nodes) {
-      if (!it.location || !it.bearings) continue;
-      const snap = snapToLine(it.location, this.navCoords, this.cumDist);
-      if (snap.dist > 25) continue;
-      if (snap.along < mDist - BEFORE || snap.along > mDist + AFTER) continue;
-      const isManeuver = Math.abs(snap.along - mDist) < 15;
-      const nodePt = toCanvas(it.location);
-      if (isManeuver) {
-        // 轉彎路口：畫出全部道路臂
-        for (const b of it.bearings) {
-          roads.push([nodePt, toCanvas(destination(it.location, STUB, b))]);
-        }
-      } else {
-        // 其他路口：只畫「與出口方向平行」的路（讓第 1 / 第 2 條看得出來）
-        const parallelArms = it.bearings.filter(
-          (b) => angDiff(b, exitBrg) < 50 || angDiff(b, (exitBrg + 180) % 360) < 50
-        );
-        if (parallelArms.length && extraNodes < 2) {
-          extraNodes++;
-          for (const b of parallelArms) {
-            roads.push([nodePt, toCanvas(destination(it.location, STUB, b))]);
-          }
-        }
+    const mNode = (nx.step.intersections || [])[0];
+    if (mNode && mNode.location && mNode.bearings) {
+      const nodePt = toCanvas(mNode.location);
+      for (const b of mNode.bearings) {
+        roads.push([nodePt, toCanvas(destination(mNode.location, STUB, b))]);
       }
+    }
+    for (const pn of priors) {
+      roads.push([
+        toCanvas(destination(pn.location, 45, pn.brg)),
+        toCanvas(destination(pn.location, 45, (pn.brg + 180) % 360)),
+      ]);
     }
     // 沒有路口資料時退回簡單畫法：直行延伸 + 轉入道路另一端
     if (!roads.length) {
@@ -923,31 +906,36 @@ export class Navigator {
   }
 
   /**
-   * 偵測轉彎點前方是否有平行的路口（例如分隔的雙向車道、帶狀公園兩側道路）。
-   * 回傳轉彎點之前 8~70 公尺內「與出口方向平行」的路口數：
-   * 0 = 遇到的第一條就是要轉的；1 = 要轉的是第二條；以此類推。
+   * 找出轉彎點之前 8~70 公尺內「與出口方向平行」的路口
+   * （分隔雙向車道、帶狀公園兩側道路等會造成第 1 / 第 2 條混淆的路）。
+   * 回傳 [{ location, brg, rel }]，語音計數與路口放大圖共用同一份資料。
    */
-  parallelRoadOrder(csi) {
+  priorParallelNodes(csi) {
     const nxt = this.flatSteps[csi + 1];
-    if (!nxt) return 0;
+    if (!nxt) return [];
     const mAlong = this.cumDist[nxt.startIdx];
-    if (!Number.isFinite(mAlong)) return 0;
+    if (!Number.isFinite(mAlong)) return [];
     const exitBrg = this.bearingAt(Math.min(this.total, mAlong + 10));
-    let count = 0;
+    const out = [];
     for (const it of this.flatSteps[csi].step.intersections || []) {
       if (!it.location || !it.bearings) continue;
       const snap = snapToLine(it.location, this.navCoords, this.cumDist);
       if (snap.dist > 25) continue;
       const rel = mAlong - snap.along;
       if (rel < 8 || rel > 70) continue;
-      const hasParallel = it.bearings.some((b) => {
+      const arm = it.bearings.find((b) => {
         let d = Math.abs(b - exitBrg) % 360;
         if (d > 180) d = 360 - d;
         return d < 35;
       });
-      if (hasParallel) count++;
+      if (arm !== undefined) out.push({ location: it.location, brg: arm, rel });
     }
-    return count;
+    return out;
+  }
+
+  /** 0 = 第一條就是要轉的；1 = 第二條；以此類推 */
+  parallelRoadOrder(csi) {
+    return this.priorParallelNodes(csi).length;
   }
 
   async reroute(currentPos, heading) {
